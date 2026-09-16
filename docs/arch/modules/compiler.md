@@ -4,7 +4,7 @@
 > 代码：`tianshu/include/tianshu/compiler/{ir.h, pipeline.h, codegen.h}` · `tianshu/src/{ir.cc, pipeline.cc, codegen.cc}`
 > 关键 ADR：[ADR-0030 L1 编译器](../../adr/0030-l1-compiler.md)（六阶段管线 / M-A~M-D / 缓存键 = 规范化哈希 / D8 分层优化） · [ADR-0001 DSL 形式](../../adr/0001-dsl-form.md)（fluent builder + auto trace 路线） · [ADR-0031 降级阶梯](../../adr/0031-fallback-degradation.md)（`fallback_flow` 的 IR 携带与 conf 导出） · [ADR-0029 SLA 编译](../../adr/0029-sla-compilation.md)（P3 的内容）
 > 测试：`tests/compiler/{ir_test.cc, pipeline_test.cc, pipeline_validation_test.cc}` · 基准：`benchmarks/codegen_vs_handwritten.cc` · 示例：`examples/traceable_flow_demo.cc`
-> 最后同步：2026-09-10 · commit `c8ed440`
+> 最后同步：2026-09-16 · commit `1e602c5`（基准测量协议勘误，无代码变更）
 
 ## 1. 职责与边界（做什么 / 明确不做什么）
 
@@ -177,7 +177,8 @@ extern "C" void tianshu_flow_install(tianshu::dsl::FlowRuntime* rt,
 
 - **三方**：handwritten（`CacheBuffer` + `DataDispatcher` 手工接线，金标准，只付 1 次自旋锁 + 1 次哈希查找 + 1 次缓冲填充）· interpreted（`FlowBuilder` → `FlowRuntime`）· compiled（`Pipeline::compile` 产物，`run(rt, flow, 0ms)` 只装接线不驱动定时源，再 `publish_bytes` 灌 1M 条）；源处 `born_ns` 打进 payload、sink 处测 e2e，P50/P99/P99.9 进 benchmark counters。
 - **as-built 形状**：short（1 map）/ medium（4）/ long（9）三条链 × 三方；roadmap §1.3 的**扇入/扇出形状未建**（M-C 待补）。
-- **D8 实施记录（2026-09-08）**：实测基线解释执行落后手写 4.4×–6.2×，差距逐项定位到运行时通用路径（互斥锁 / 字符串哈希 ×3-4 / 血缘拷贝 / 分支向量堆分配）；分层修复 L1（单查找上下文）、L1b（稳态无锁 + 反馈通道每通道自旋锁修正）、L2a/L2b/L2c（末端移动语义 / SmallVec 血缘内联 / 历史负载内联）**全部落地**，290/290 + 27/27 护航。**判决数字必须在空闲机取**（开发宿主机 load 2-16 波动，锁持有路径争用下不成比例劣化；空闲实测中链 p50 一度 −52%）——这是 H2 尚未正式裁定、模块状态保持 🟡 的直接原因。
+- **D8 实施记录（2026-09-08）**：实测基线解释执行落后手写 4.4×–6.2×，差距逐项定位到运行时通用路径（互斥锁 / 字符串哈希 ×3-4 / 血缘拷贝 / 分支向量堆分配）；分层修复 L1（单查找上下文）、L1b（稳态无锁 + 反馈通道每通道自旋锁修正）、L2a/L2b/L2c（末端移动语义 / SmallVec 血缘内联 / 历史负载内联）**全部落地**，290/290 + 27/27 护航。**判决数字必须在空闲机取**（开发宿主机 load 2-16 波动，锁持有路径争用下不成比例劣化）——这是 H2 尚未正式裁定、模块状态保持 🟡 的直接原因。
+- **勘误（2026-09-16）**：本段与 ADR-0030 实施记录所引"手写三形状基线应复现 ~50/110/360ns"中 **medium=110 不可复现**——空闲大核实测 180、空闲小核 261、退回 D8 态代码（`62b21aa`）亦 171；ADR 正文 D8 基线表的 260 与小核空闲实测吻合（疑为小核采样）。"空闲实测中链 p50 −52%"同样未确定性复现（当前空闲大核中链解释执行 p50 ≈ 1.05-1.09µs，较 D8 表 1182ns 仅 −8~12%）。有效环境判据以 §6.1 重定基线为准。
 
 ## 4. 与其它模块的关系
 
@@ -206,14 +207,43 @@ extern "C" void tianshu_flow_install(tianshu::dsl::FlowRuntime* rt,
 - `tests/compiler/ir_test.cc`（9 用例，M-A 验收）：降维 kinds+WCET · 拓扑生产者在前 · 哈希跨运行稳定 · **哈希对声明序不敏感**（双分支 join 两种声明序收敛）· `.dag` 导出含全通道与 hash · `.conf` 与 SlaReport 预算一致 · normalize 保节点数与匿名形状（幂等）· 全节点种类降维（source/map/op/stateful/span）· **from() 全 arity 降维**（2026-09-10）。
 - `tests/compiler/pipeline_test.cc`（4 用例，M-B 验收）：产物输出 = 解释执行输出 · 二次编译命中缓存 · 编译器缺失 degraded 但仍出全部输出 · 产物拒绝外来 flow（哈希守卫）。
 - `tests/compiler/pipeline_validation_test.cc`（5 用例，D6 降级路径）：悬空输入 / 重复生产者结构拒绝（经 `IrGraphTestPeer` 友元注入故障图——公共 IR 面刻意不可变）· 良形图通过 · strict 模式抛 `runtime_error` · `CompiledFlow` 移动语义全路径。
-- 基准：`benchmarks/codegen_vs_handwritten.cc`——3 链形 × 3 实现各 1M 条，P50/P99/P99.9 counters；运行 `./build/desktop-release/bin/codegen_vs_handwritten --benchmark_min_time=1s`（**判决须空闲机**，手写三形状基线 ~50/110/360ns 方为有效环境，ADR-0030 D8）。
+- 基准：`benchmarks/codegen_vs_handwritten.cc`——3 链形 × 3 实现各 1M 条，P50/P99/P99.9 counters；运行 `./build/desktop-release/bin/codegen_vs_handwritten --benchmark_min_time=1s`。**H2 判决数字必须按 §6.1 测量协议取**。
 - 示例：`examples/traceable_flow_demo.cc`（M-D：注册表枚举 → 按名 dry-run trace → SLA 报告 / artifact hash / fallback 阶梯打印 → 编译运行 → `fallback_state()`）。
+
+### 6.1 H2 判决测量协议（2026-09-16 实机验证）
+
+开发宿主机为**异构 CPU**（AMD Ryzen AI 9 HX 370：逻辑 0-3 / 12-15 = Zen5 大核，5.16GHz + 16MB L3 簇；其余 16 线程 = Zen5c 小核，3.29GHz + 8MB L3 簇）。不绑核时调度器会把单线程 benchmark 挪到大核；**若显式绑到小核，全部数字无声放大 ~1.8×**（实测手写 short 50→90ns、long 331→561ns）——判决跑法必须绑大核。
+
+**有效环境判据**（空闲 + 大核 + performance governor；三轮 p50 应一字不差）：
+
+| 手写 | short | medium | long |
+|---|---|---|---|
+| p50 | 50 ns | 180 ns | 331 ns |
+| p99 | 51 | 191 | 331 |
+
+p99 显著抬头即环境被扰动，数字不作数。取数步骤（cgroup v2 盾，把 user/system 两个 slice 挤出大核物理核 3 = 逻辑 3+15）：
+
+```bash
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sudo systemctl set-property --runtime user.slice  AllowedCPUs=0-2,4-14,16-23
+sudo systemctl set-property --runtime system.slice AllowedCPUs=0-2,4-14,16-23
+sudo mkdir /sys/fs/cgroup/tianshu-bench
+echo "3,15" | sudo tee /sys/fs/cgroup/tianshu-bench/cpuset.cpus
+echo 0      | sudo tee /sys/fs/cgroup/tianshu-bench/cpuset.mems
+./build/desktop-release/bin/codegen_vs_handwritten --benchmark_min_time=1s &
+echo $! | sudo tee /sys/fs/cgroup/tianshu-bench/cgroup.procs  # 先进组（此时亲和继承 housekeeping）
+taskset -pc 3 $!                                            # 再绑核（顺序反了则亲和交集为空，进程无法调度）
+# 还原：sudo rmdir /sys/fs/cgroup/tianshu-bench
+#       sudo systemctl set-property --runtime user.slice  AllowedCPUs=0-23   # 注意：置 "" 不生效，须显式全量
+#       sudo systemctl set-property --runtime system.slice AllowedCPUs=0-23
+#       echo powersave | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+```
 
 ## 7. 已知限制与演进方向
 
 - **P2 optimize 未落地**：直通消除与常量传播还在 ADR-0030 D3 表里；当前优化全部依赖 `-O2` + D8 运行时层。落地时管线在 `validate` 与 SLA 报告携带之间插入改写阶段（需同步 `stable_hash` 语义：优化应幂等于规范化）。
 - **codegen 未做逐消息特化**（M-C 核心）：产物复放 wire 语义，per-message 路径仍是运行时通用路径；D4 的"算子 lambda 内联进 dispatch 回调 + SLA 预算 `static_assert` 级注释 + 直方图挂点"待 M-C 交付。
-- **H2 判决未正式裁定**：D8 分层优化已落地且 CI 矩阵护航（L1b 期间 CI 抓到反馈通道双写者堆破坏，本地/asan 不可见），但 <1% 的判决数字须空闲机复现基线后正式记录；扇入/扇出链形待补。
+- **H2 判决未正式裁定**：D8 分层优化已落地且 CI 矩阵护航（L1b 期间 CI 抓到反馈通道双写者堆破坏，本地/asan 不可见），但 <1% 的判决数字须按 §6.1 测量协议（大核盾 + 重定基线判据）取数后正式记录；扇入/扇出链形待补。
 - **P1 分析面窄**：无类型一致性检查（IR 层类型已擦除为字符串）、环不被拒绝只被确定性排序——完整 analyze 语义待 M-C。
 - **`ti compile` CLI 缺位**：离线预编译（车端冷启动秒级首编译的主要缓解）只能经进程内 `Pipeline::compile` + 缓存目录复用间接达成。
 - **`.dag`/`.conf` 无消费方**：装载路径不读它们（守卫靠运行期重算哈希）；`ti launch` 接 dry-run 重放（M-D 收尾）后它们才成为装载输入。
