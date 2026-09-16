@@ -8,6 +8,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 Phase 1 PoC — in progress.
 
+### H2 rig: fan-in / fan-out benchmark shapes (roadmap 1.3)
+
+- benchmarks/codegen_vs_handwritten.cc: two new shapes round out the
+  five-shape H2 verdict rig — fan-in (three sources fused by two nested
+  binary joins; DSL v0 join is binary, so the roadmap's "(A,B,C)->D"
+  converges via J1(A,B) + J2(J1,C)) and fan-out (one source feeding four
+  branch maps; every delivery counts as one latency sample)
+- the handwritten gold standard mirrors both shapes (staging-slot
+  joiner; four consumer buffers on the source channel), keeping the
+  three-way comparison apples-to-apples
+- shielded validation (idle Zen5 core): compiled matches interpreted on
+  both new shapes — the M-B wire-replay invariant extends to joins and
+  multi-consumer fan-out
+
 ### Documentation — living architecture docs
 
 - docs/arch/: as-built architecture tree — README (module status table +
