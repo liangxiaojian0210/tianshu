@@ -60,7 +60,7 @@
 |---|---|
 | `channel_id_for(name)` | 通道名 FNV-1a 哈希 → `ChannelId`（uint64，跨进程稳定，与 SHM 段名派生同哈希族） |
 | `DataDispatcher::instance()` | 单例；`add_buffer(channel_id, CacheBufferBase*, notify, owner)` / `remove_owner(owner)` / `dispatch(channel_id, data, size)` |
-| `DataVisitor<T0[, T1[, T2[, T3]]]>` | 每输入一个 `CacheBuffer<T>`（depth 由构造参数给定）；构造即向 dispatcher 注册，析构 `remove_owner`；`try_fetch_0()..try_fetch_3()` 逐输入消费 |
+| `DataVisitor<T0[, T1[, T2[, T3]]]>` | 每输入一个 `CacheBuffer<T>`（depth 由构造参数给定）；构造即向 dispatcher 注册，析构 `remove_owner`；`try_fetch_0()..try_fetch_3()` 逐输入消费。融合回调 `on_fuse` 存为成员、注册的 notify 只捕 `this`（≤16B 内联）——dispatcher 每次投递按 sink 拷贝 notify 的 `std::function`，小捕获使其免堆拷贝与捕获态深拷贝（含 shared_ptr 引用计数抖动，2026-09-17 join 通知链实测每消息 4 对原子加减） |
 | `DataNotifier::instance()` | 单例；`add_notifier(channel_id, notify, owner)` / `remove_owner(owner)` / `notify(channel_id)` 返回触发数 |
 
 ### 2.4 Component 框架（`core/component.h`）

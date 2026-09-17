@@ -58,14 +58,18 @@ class DataVisitor;
 template <typename T0>
 class DataVisitor<T0> {
  public:
+  // on_fuse is stored as a member so the registered notify captures only
+  // `this`: the dispatcher copies the notify std::function per sink per
+  // dispatch, and a small-capture callable stays inside its inline buffer
+  // (no heap clone, no captured-state deep copy on the delivery path).
   DataVisitor(std::string_view ch0, std::size_t depth, std::function<void()> on_fuse)
-      : buffer0_(std::make_unique<base::CacheBuffer<T0>>(depth)) {
+      : buffer0_(std::make_unique<base::CacheBuffer<T0>>(depth)), on_fuse_(std::move(on_fuse)) {
     const ChannelId id0 = channel_id_for(ch0);
     DataDispatcher::instance().add_buffer(
         id0, buffer0_.get(),
-        [this, on_fuse = std::move(on_fuse)] {
+        [this] {
           if (!buffer0_->empty()) {
-            on_fuse();
+            on_fuse_();
           }
         },
         this);
@@ -80,6 +84,7 @@ class DataVisitor<T0> {
 
  private:
   std::unique_ptr<base::CacheBuffer<T0>> buffer0_;
+  std::function<void()> on_fuse_;
 };
 
 template <typename T0, typename T1>
@@ -88,10 +93,11 @@ class DataVisitor<T0, T1> {
   DataVisitor(std::string_view ch0, std::string_view ch1, std::size_t depth,
               std::function<void()> on_fuse)
       : buffer0_(std::make_unique<base::CacheBuffer<T0>>(depth)),
-        buffer1_(std::make_unique<base::CacheBuffer<T1>>(depth)) {
-    const auto fused = [this, on_fuse = std::move(on_fuse)] {
+        buffer1_(std::make_unique<base::CacheBuffer<T1>>(depth)),
+        on_fuse_(std::move(on_fuse)) {
+    const auto fused = [this] {
       if (!buffer0_->empty() && !buffer1_->empty()) {
-        on_fuse();
+        on_fuse_();
       }
     };
     DataDispatcher::instance().add_buffer(channel_id_for(ch0), buffer0_.get(), fused, this);
@@ -109,6 +115,7 @@ class DataVisitor<T0, T1> {
  private:
   std::unique_ptr<base::CacheBuffer<T0>> buffer0_;
   std::unique_ptr<base::CacheBuffer<T1>> buffer1_;
+  std::function<void()> on_fuse_;
 };
 
 template <typename T0, typename T1, typename T2>
@@ -118,10 +125,11 @@ class DataVisitor<T0, T1, T2> {
               std::function<void()> on_fuse)
       : buffer0_(std::make_unique<base::CacheBuffer<T0>>(depth)),
         buffer1_(std::make_unique<base::CacheBuffer<T1>>(depth)),
-        buffer2_(std::make_unique<base::CacheBuffer<T2>>(depth)) {
-    const auto fused = [this, on_fuse = std::move(on_fuse)] {
+        buffer2_(std::make_unique<base::CacheBuffer<T2>>(depth)),
+        on_fuse_(std::move(on_fuse)) {
+    const auto fused = [this] {
       if (!buffer0_->empty() && !buffer1_->empty() && !buffer2_->empty()) {
-        on_fuse();
+        on_fuse_();
       }
     };
     DataDispatcher::instance().add_buffer(channel_id_for(ch0), buffer0_.get(), fused, this);
@@ -142,6 +150,7 @@ class DataVisitor<T0, T1, T2> {
   std::unique_ptr<base::CacheBuffer<T0>> buffer0_;
   std::unique_ptr<base::CacheBuffer<T1>> buffer1_;
   std::unique_ptr<base::CacheBuffer<T2>> buffer2_;
+  std::function<void()> on_fuse_;
 };
 
 template <typename T0, typename T1, typename T2, typename T3>
@@ -152,10 +161,11 @@ class DataVisitor<T0, T1, T2, T3> {
       : buffer0_(std::make_unique<base::CacheBuffer<T0>>(depth)),
         buffer1_(std::make_unique<base::CacheBuffer<T1>>(depth)),
         buffer2_(std::make_unique<base::CacheBuffer<T2>>(depth)),
-        buffer3_(std::make_unique<base::CacheBuffer<T3>>(depth)) {
-    const auto fused = [this, on_fuse = std::move(on_fuse)] {
+        buffer3_(std::make_unique<base::CacheBuffer<T3>>(depth)),
+        on_fuse_(std::move(on_fuse)) {
+    const auto fused = [this] {
       if (!buffer0_->empty() && !buffer1_->empty() && !buffer2_->empty() && !buffer3_->empty()) {
-        on_fuse();
+        on_fuse_();
       }
     };
     DataDispatcher::instance().add_buffer(channel_id_for(ch0), buffer0_.get(), fused, this);
@@ -179,6 +189,7 @@ class DataVisitor<T0, T1, T2, T3> {
   std::unique_ptr<base::CacheBuffer<T1>> buffer1_;
   std::unique_ptr<base::CacheBuffer<T2>> buffer2_;
   std::unique_ptr<base::CacheBuffer<T3>> buffer3_;
+  std::function<void()> on_fuse_;
 };
 
 }  // namespace tianshu::core

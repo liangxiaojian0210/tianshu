@@ -53,6 +53,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 Phase 1 PoC — in progress.
 
+### DataVisitor notify captures stay inline (join path refcount churn)
+
+- data_visitor.h (all four arities): on_fuse is stored as a member and
+  the registered notify captures only `this` (8 bytes, inline). The
+  dispatcher copies the notify std::function per sink per dispatch;
+  with a large capture the copy heap-clones the callable and deep-copies
+  captured state — on join notify chains (which carry a shared_ptr box)
+  that was 4 atomic refcount add/release pairs per message (~46 ns on
+  the H2 fan-in shape). Same-round gate diff: fan-in 170 -> 150 ns;
+  interpreted long drops ~170 ns (shared machinery); other shapes
+  unchanged. A single-slot-inbox experiment (depth-1 linear slots)
+  missed its prediction and was rolled back per the fix discipline —
+  32-slot rings at ~100 B/slot stay L1-resident; the per-hop inbox cost
+  is the head/tail atomic pair itself, not cache locality.
+
 ### Typed source entry (ADR-0033)
 
 - `dsl::SourceEntry`: a direct publish for one flow-declared source
