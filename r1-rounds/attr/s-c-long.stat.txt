@@ -1,0 +1,10 @@
+79,,context-switches,14262691679,100.00,5.5,cs/sec  cs_per_second
+0,,cpu-migrations,14262687311,100.00,0.0,migrations/sec  migrations_per_second
+7707,,page-faults,14262684816,100.00,540.4,faults/sec  page_faults_per_second
+14262.68,msec,task-clock,14262682682,100.00,0.9,CPUs  CPUs_utilized
+868239717,,L1-dcache-load-misses,6112035003,42.00,0.7,%  l1d_miss_rate
+49577512,,branch-misses,6115046035,42.00,0.1,%  branch_miss_rate
+54849183565,,branches,6114863104,42.00,3845.6,M/sec  branch_frequency
+68774667730,,cpu-cycles,6113687693,42.00,4.8,GHz  cycles_frequency
+277754710644,,instructions,6110916743,42.00,4.0,instructions  insn_per_cycle
+10512123767,,stalled-cycles-frontend,6110651821,42.00,0.15,frontend_cycles_idle

@@ -78,3 +78,48 @@ FAIL 判决不变（门槛 ≤2ns/跳，仍差一个数量级）。
 4. fan 去虚化 / join 快路径重做 —— 中等收益（join 本体 96ns、每跳 7-9ns）。
 5. CacheBuffer std::mutex 取舍 —— 两侧共享非门差值来源，但绝对成本最大单头
    （long 360ns/msg），L4 层议题。
+
+## 附录：perf-stat 顶层账（2026-09-17 补采，判据 E 计数器证据）
+
+> 采集：`h2_perf.sh stat`（盾内，min_time=10s，perf stat -d -p PID）。两处方法学注记：
+> ① perf `-x,` CSV 的 value 列**已按多路复用预换算**，首版解析再除 coverage 导致绝对量
+> ×2.38 虚高（比值类不受影响），下表为修正值；② stat 窗口含编译/排序等消息外阶段
+> （占比 ~15-35%，随形状），绝对量仅供量级与边际对比，比值类稳健。
+
+| 运行 | cyc/msg | IPC | br/msg | brmiss 率 | L1d miss/msg | fe_idle |
+|---|---|---|---|---|---|---|
+| c-short | 1394 | 3.66 | 1010 | 0.21% | 12 | 22% |
+| c-medium | 2896 | 4.07 | 2257 | 0.10% | 44 | 17% |
+| c-long | 5292 | 4.04 | 4221 | 0.09% | **67** | 15% |
+| c-fanin | 4853 | 3.66 | 3705 | 0.12% | 42 | 21% |
+| c-fanout | 4083 | 3.57 | 2956 | 0.35% | 51 | 21% |
+| h-short | 675 | 3.85 | 576 | 0.26% | 2 | 26% |
+| h-medium | 1606 | 4.60 | 1567 | 0.11% | 2 | 16% |
+| h-long | 3791 | 4.53 | 3661 | 0.17% | **2.5** | 14% |
+| h-fanin | 1871 | 4.49 | 1878 | 0.18% | 2 | 20% |
+| h-fanout | 2451 | 3.91 | 2153 | 0.43% | 10 | 27% |
+
+### S1 差距构成 = 更多的工作，不是 IPC 塌缩或分支误预测
+
+compiled IPC 比gold 低 ~10%（3.6-4.1 vs 3.9-4.6），分支数多 15-44%/消息；两侧
+brmiss 率都 ≤0.43%——差距来自每消息执行与访存的绝对增量（原子锁、环、血缘拷贝），
+不是预测失效。IPC 锚点交叉验证：h-medium 1606cyc@5.16GHz=311ns vs 迭代均值
+295ns（+5%）、c-short 270 vs 254ns（+6%）——主报告 cycle-share→ns 换算保真度
+约 ±10-15%，原 IPC 偏差警示有界。
+
+### S2 L1-dcache miss 每消息 5-27×（结构性访存差）
+
+compiled long ~67 vs gold ~2.5 misses/msg。通道名 SSO 假设**证伪**（flow.h:503/505
+命名 = "cmp4/src" 8 字符 / "cmp4/~N"，全部 SSO；cfree 采样 ~0.5% 亦证每消息无堆）。
+主嫌疑 = **每跳旋转载体**：gold 血缘走单槽 slot（每消息同一行，L1 常驻）；compiled
+走 16 深定容 LineageInbox 环 + 入口 HistoryRing，轮转触冷行；SmallVec 分支拷贝与
+fan-in shared_ptr 控制块叠加。按 ~14cyc/miss 估潜在停顿贡献 ~170ns/msg（long），
+与主账 mutex/lineage/string 组件部分重叠（同一操作的 miss 与停顿），不重复计入。
+
+### S3 compiled 边际每跳平坦、gold 边际每跳上涨（判据 E 计数器证据）
+
+cycles 边际：compiled (5292−2896)/5=479 vs (2896−1394)/3=501 cyc/hop ≈ 93/97ns
+@5.16GHz——平坦；gold (3791−1606)/5=437→85ns/hop vs (1606−675)/3=310→60ns/hop
+——上涨 +42%。与主报告结论一致：diff/hops 的"medium 每跳贵过 long"伪影根源在
+gold 侧非线性（深度越深每跳越贵），compiled 侧线性。注意含每迭代开销污染
+（排序 ~60ns/msg 对称存在，c-* 另含编译摊销）。
