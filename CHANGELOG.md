@@ -53,6 +53,29 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 Phase 1 PoC — in progress.
 
+### Per-fn fast-stage instantiation — direct operator calls (ADR-0035)
+
+- FlowChain::map/map_to/sink and FlowBuilder::join now carry the
+  operator's own functor type F (deduced at the call site) alongside
+  the message types; the specialize-hook factories
+  (make_map/join/sink_specialize<T..., F>) hand F to new
+  SpecializeBuilder::add_*_fn entry points, and FastMap/Join/SinkStage
+  gained the F template parameter so the operator call `fn_(msg)`
+  inlines with cross-call optimization restored. Passing a
+  std::function degrades gracefully to the erased call; IR structure,
+  stable hash, and the .gen.cc artifact contract are unchanged
+  (instantiation happens inside the host-side hooks). raw_fn_ function-
+  pointer extraction removed (subsumed by F).
+- Same-round gate diff (shielded, gold at baseline): short 20 /
+  medium 109 / long 130 / fan-in 130 / fan-out 70 ns; marginal
+  per-hop overhead k ~= 4.2 ns/hop (was 6-8), matching the ADR's
+  2-5 ns prediction. F-attribution: the gold first-bench cold-start
+  hypothesis is rejected (isolated == in-rig 110 ns); earlier-session
+  gold inflation was time drift (immediate re-run back at baseline);
+  the envelope-model F ~ 80-90 ns mostly absorbs the gold side's own
+  superlinear per-hop growth, not a compiled-side fixed cost.
+- Full suite green: 339/339 ctest, 33/33 bazel.
+
 ### H2 gate semantics v3: additive promise + workload-conditioned percentage
 
 - ADR-0034 (accepted): the headline promise is now two-layer. Main:

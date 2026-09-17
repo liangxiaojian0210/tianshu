@@ -45,7 +45,7 @@
 | [0031](./0031-fallback-degradation.md) | 降级阶梯：with_fallback 声明与运行期降级信号 | dsl | ✅ | 加载期校验 fallback 名、IR/.conf 携带、20ms 窗口 miss 检测、fallback_state() 信号（v0 不热切换） |
 | [0032](./0032-per-message-specialization.md) | M-C 逐消息特化：类型化宿主钩子与 H2 门槛重校准 | dsl | ✅ | D4 类型墙修正、Flow 自推导通道计划、LineageInbox、历史捕获收窄、录制回落、门槛 max(1%, 2ns/跳) |
 | [0034](./0034-gate-semantics-v3.md) | H2 门语义 v3：加性承诺与负载条件化百分比 | compiler | ✅ | 主承诺 diff≤F+k×跳+m×支（k≤2ns/F≤20ns/m待定）、从承诺 W≥(F+k·hops)/1% 时 <1%、判决双轨报告、加性实证 |
-| [0035](./0035-per-fn-instantiation.md) | 算子直呼：specialize 钩子 per-fn 实例化 | dsl | 📐 | make_*_specialize<TIn,TOut,F>、FastStage 增 F 模板参、IR/产物契约不变、地板重论证联动 0034 |
+| [0035](./0035-per-fn-instantiation.md) | 算子直呼：specialize 钩子 per-fn 实例化 | dsl | ✅ | make_*_specialize<TIn,TOut,F>、FastStage 增 F 模板参、IR/产物契约不变、地板重论证联动 0034 |
 | [0033](./0033-typed-source-entry.md) | 类型化源入口：入口段特化与判决口径统一 | dsl | ✅ | 宿主侧 SourceEntry、FanBinding 同构冻结、录制回落、历史收窄、协议 v2 线程预热 |
 
 ## 域视图

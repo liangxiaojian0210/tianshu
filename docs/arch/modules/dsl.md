@@ -57,12 +57,12 @@
 
 | 方法 | 说明 |
 |---|---|
-| `map<TOut>(fn)` | 纯函数级联，自动匿名通道 |
-| `map_to<TOut>(out_name, fn)` | 显式输出通道的 map——反馈写回边（写别人也 join 的通道） |
+| `map<TOut>(fn)` | 纯函数级联，自动匿名通道。`fn` 按原始 functor 类型携带（ADR-0035）：特化安装的 fast stage 直呼算子（可内联）；`std::function` 实参优雅退化为间接调用 |
+| `map_to<TOut>(out_name, fn)` | 显式输出通道的 map——反馈写回边（写别人也 join 的通道）；fn 携带同 `map` |
 | `with_sla(sla::Sla)` | 端点语义（ADR-0029 D1）：deadline 绑定当前链通道，build 期验证最坏上游路径 |
 | `with_wcet(std::chrono::microseconds)` | 声明产出该通道节点的 WCET（ADR-0029 D2；未声明节点吃默认值并被点名） |
 | `with_fallback(flow_name)` | 同 builder 版本（链上任一位置声明均可） |
-| `sink(fn)` | 终端回调 `fn(const T&, const core::Lineage&)` |
+| `sink(fn)` | 终端回调 `fn(const T&, const core::Lineage&)`；fn 按原始类型携带（ADR-0035） |
 | `build()` / `valid()` | 结束声明 / 检查 `from()` 失败产物（未注册名或形状不匹配 → invalid chain，下游自然 no-op） |
 
 **`Flow`**（不可变声明图）：`sources()/maps()/joins()/ops()/statefuls()/spans()/froms()/sinks()` 节点表访问 · `sla_report()`（budgets / violations / `saturation_warning` / `default_wcet_notes`）· `sla_endpoints()` · `wcet_by_out()`（编译器 IR 输入，ADR-0030 D2）· `fallback_flow()` · `describe()`（`"src[...] map[a -> b] join[a + b -> c] op[...] stateful[...] span[t x d -> o] from[...] sink[...]"` 汇总串）。
