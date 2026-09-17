@@ -14,6 +14,8 @@
 
 #include "tianshu/dsl/dsl_runtime.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -70,15 +72,51 @@ const FlowRuntime::PublishCtx& FlowRuntime::resolve_publish_ctx(const std::strin
   // under the runtime mutex and publishes a copy-on-write snapshot.
   // Entry shared_ptrs keep each channel's SpinLock identity stable
   // across snapshot swaps.
+  //
+  // Pointer-identity fast path (ADR-0032): drive loops and replay
+  // publish through one stable string object per channel, so a
+  // thread_local {owner, key, content-snapshot, epoch} cache skips the
+  // hash on the steady-state entry path. The owner check defeats
+  // cross-runtime address reuse; the epoch check (bumped at every
+  // snapshot swap) keeps the cache coherent across wiring rounds and
+  // recorder arming; the content snapshot defeats same-address reuse
+  // by a different string.
+  struct PtrCache {
+    const FlowRuntime* owner{nullptr};
+    const std::string* key{nullptr};
+    std::uint64_t epoch{0};
+    std::size_t len{0};
+    std::array<char, 48> bytes{};
+    std::shared_ptr<PublishCtx> ctx;
+  };
+  static thread_local PtrCache cache;
+  const std::uint64_t epoch = ctx_epoch_.load(std::memory_order_acquire);
+  const std::size_t cmp_len = std::min(channel.size(), cache.bytes.size());
+  if (cache.owner == this && cache.epoch == epoch && cache.key == &channel &&
+      cache.len == channel.size() &&
+      channel.compare(0, cmp_len, cache.bytes.data(), cmp_len) == 0) {
+    return *cache.ctx;
+  }
+  auto fill_cache = [this, &channel, epoch, cmp_len](const std::shared_ptr<PublishCtx>& ctx) {
+    cache.owner = this;
+    cache.key = &channel;
+    cache.epoch = epoch;
+    cache.len = channel.size();
+    cache.bytes.fill('\0');
+    std::copy_n(channel.begin(), cmp_len, cache.bytes.begin());
+    cache.ctx = ctx;
+  };
   auto snapshot = pub_ctx_.load();
   auto ctx_entry = snapshot->find(channel);
-  if (ctx_entry != snapshot->end()) {
+  if (ctx_entry != snapshot->end() && epoch == ctx_epoch_.load(std::memory_order_acquire)) {
+    fill_cache(ctx_entry->second);
     return *ctx_entry->second;
   }
   const std::scoped_lock lock(mutex_);
   snapshot = pub_ctx_.load();
   ctx_entry = snapshot->find(channel);
   if (ctx_entry != snapshot->end()) {
+    fill_cache(ctx_entry->second);
     return *ctx_entry->second;
   }
   auto resolved = std::make_shared<PublishCtx>();
@@ -88,6 +126,7 @@ const FlowRuntime::PublishCtx& FlowRuntime::resolve_publish_ctx(const std::strin
     resolved->queues = queues_it->second;
   }
   resolved->history = &histories_.try_emplace(channel, kHistoryDepth).first->second;
+  resolved->history_on = history_observers_.empty() || history_observers_.contains(channel);
   if (recorder_ != nullptr) {
     const auto id_it = recorder_channel_ids_.find(channel);
     resolved->rec_ch = id_it != recorder_channel_ids_.end()
@@ -104,7 +143,9 @@ const FlowRuntime::PublishCtx& FlowRuntime::resolve_publish_ctx(const std::strin
   pub_ctx_.store(
       std::shared_ptr<const std::unordered_map<std::string, std::shared_ptr<PublishCtx>>>(
           std::move(fresh)));
-  return *(*pub_ctx_.load()).at(channel);
+  const auto& entry = *(*pub_ctx_.load()).at(channel);
+  fill_cache((*pub_ctx_.load()).at(channel));
+  return entry;
 }
 
 void FlowRuntime::publish_impl(const std::string& channel, const void* data, std::size_t size,
@@ -151,13 +192,18 @@ void FlowRuntime::publish_impl(const std::string& channel, const void* data, std
   // History first: it copies while the lineage is still intact; the
   // last consumer queue then receives the move. With no consumers the
   // history itself takes the move. The per-channel lock covers feedback
-  // channels' second writer; uncontended elsewhere.
+  // channels' second writer; uncontended elsewhere. Specialized runs
+  // skip the capture on channels with no graph-declared observer
+  // (ADR-0032 narrowing); on those channels a move-only lineage with
+  // no consumers is simply dropped.
   {
     const std::scoped_lock push_guard(ctx.push_lock);
-    if (lineage_move != nullptr && ctx.queues.empty()) {
-      ctx.history->push(own_seq_of(lineage), data, size, std::move(*lineage_move));
-    } else {
-      ctx.history->push(own_seq_of(lineage), data, size, lineage);
+    if (ctx.history_on) {
+      if (lineage_move != nullptr && ctx.queues.empty()) {
+        ctx.history->push(own_seq_of(lineage), data, size, std::move(*lineage_move));
+      } else {
+        ctx.history->push(own_seq_of(lineage), data, size, lineage);
+      }
     }
 
     for (std::size_t i = 0; i < ctx.queues.size(); ++i) {
@@ -204,6 +250,18 @@ void FlowRuntime::start_recording(const std::string& path, record::Compression c
       static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                      std::chrono::steady_clock::now().time_since_epoch())
                                      .count());
+  // Arm the fast-path fallback and drop resolved publish contexts so
+  // every channel re-resolves with recorded=true. Without this, a
+  // recorder armed after the first publish (or after a specialized
+  // install, which pre-resolves its fan channels) would silently skip
+  // capture on the already-resolved entries.
+  recording_active_.store(true, std::memory_order_relaxed);
+  {
+    const std::scoped_lock lock(mutex_);
+    pub_ctx_ =
+        std::make_shared<const std::unordered_map<std::string, std::shared_ptr<PublishCtx>>>();
+    ++ctx_epoch_;
+  }
 }
 
 bool FlowRuntime::stop_recording() {
@@ -213,6 +271,13 @@ bool FlowRuntime::stop_recording() {
   const bool ok = recorder_->finish();
   recorder_.reset();
   recorder_channel_ids_.clear();
+  recording_active_.store(false, std::memory_order_relaxed);
+  {
+    const std::scoped_lock lock(mutex_);
+    pub_ctx_ =
+        std::make_shared<const std::unordered_map<std::string, std::shared_ptr<PublishCtx>>>();
+    ++ctx_epoch_;
+  }
   return ok;
 }
 
@@ -252,6 +317,7 @@ std::shared_ptr<detail::LineageQueue> FlowRuntime::register_lineage_queue(
     const std::scoped_lock lock(mutex_);
     pub_ctx_ =
         std::make_shared<const std::unordered_map<std::string, std::shared_ptr<PublishCtx>>>();
+    ++ctx_epoch_;
   }
   auto lineage_queue = std::make_shared<detail::LineageQueue>(kQueueDepth * 2);
   const std::scoped_lock lock(mutex_);
@@ -260,7 +326,32 @@ std::shared_ptr<detail::LineageQueue> FlowRuntime::register_lineage_queue(
   return lineage_queue;
 }
 
+detail::LineageChannel* FlowRuntime::register_specialized_slot(const std::string& channel,
+                                                               bool inbox) {
+  std::unique_ptr<detail::LineageChannel> slot;
+  if (inbox) {
+    slot = std::make_unique<detail::LineageInbox>(kQueueDepth * 2);
+  } else {
+    slot = std::make_unique<detail::LineageQueue>(kQueueDepth * 2);
+  }
+  const std::scoped_lock lock(mutex_);
+  pub_ctx_ = std::make_shared<const std::unordered_map<std::string, std::shared_ptr<PublishCtx>>>();
+  ++ctx_epoch_;
+  channel_queues_[channel].push_back(slot.get());
+  owned_slots_.push_back(std::move(slot));
+  return owned_slots_.back().get();
+}
+
 FlowRuntime::~FlowRuntime() {
+  // Deregister dispatcher sinks before the stage buffers die: the
+  // dispatcher is a process-wide singleton, and leftover entries are
+  // dangling pointers that a later runtime publishing on the same
+  // channel id would call into (two sequentially destroyed runtimes
+  // with identical flow names crash the second publish otherwise).
+  auto& dispatcher = core::DataDispatcher::instance();
+  for (const auto& stage : stages_) {
+    dispatcher.remove_owner(stage->dispatcher_owner());
+  }
   for (const auto& comp : components_) {
     comp->shutdown();
   }
@@ -411,6 +502,8 @@ void FlowRuntime::wire(const Flow& flow) {
     const std::scoped_lock lock(mutex_);
     pub_ctx_ =
         std::make_shared<const std::unordered_map<std::string, std::shared_ptr<PublishCtx>>>();
+    ++ctx_epoch_;
+    history_observers_.clear();
   }
   if (!flow.sla_endpoints().empty() && sla_stats_ == nullptr) {
     sla_stats_ = std::make_unique<sla::SlaStatsCollector>();
@@ -439,6 +532,75 @@ void FlowRuntime::wire(const Flow& flow) {
   for (const auto& sink_decl : flow.sinks()) {
     sink_decl.wire(*this);
   }
+}
+
+SpecializeBuilder FlowRuntime::begin_specialize(const Flow& flow) {
+  {
+    const std::scoped_lock lock(mutex_);
+    pub_ctx_ =
+        std::make_shared<const std::unordered_map<std::string, std::shared_ptr<PublishCtx>>>();
+    ++ctx_epoch_;
+    history_observers_.clear();
+  }
+  // Same SLA arming discipline as wire(): compiled artifacts install
+  // through here, so a flow with endpoints gets its histograms armed.
+  // Those flows stay fully generic in v0 (ADR-0032), which keeps the
+  // thread_local born-stamp logic of publish_impl as the single
+  // implementation.
+  if (!flow.sla_endpoints().empty() && sla_stats_ == nullptr) {
+    sla_stats_ = std::make_unique<sla::SlaStatsCollector>();
+    for (const auto& endpoint : flow.sla_endpoints()) {
+      sla_stats_->add_endpoint(endpoint.channel, endpoint.deadline);
+    }
+  } else {
+    // History-capture narrowing applies only to non-SLA flows; SLA
+    // flows run the generic path in full.
+    for (const auto& span_decl : flow.spans()) {
+      history_observers_.insert(span_decl.data_channel);
+    }
+    for (const auto& st_decl : flow.statefuls()) {
+      history_observers_.insert(st_decl.state_channel);
+    }
+  }
+  return {*this, flow};
+}
+
+void FlowRuntime::wire_specialized(const Flow& flow) {
+  SpecializeBuilder plan = begin_specialize(flow);
+  for (const auto& map_decl : flow.maps()) {
+    if (map_decl.specialize) {
+      map_decl.specialize(*this, plan);
+    } else {
+      map_decl.wire(*this);
+    }
+  }
+  for (const auto& join_decl : flow.joins()) {
+    if (join_decl.specialize) {
+      join_decl.specialize(*this, plan);
+    } else {
+      join_decl.wire(*this);
+    }
+  }
+  for (const auto& op_decl : flow.ops()) {
+    op_decl.wire(*this);
+  }
+  for (const auto& st_decl : flow.statefuls()) {
+    st_decl.wire(*this);
+  }
+  for (const auto& span_decl : flow.spans()) {
+    span_decl.wire(*this);
+  }
+  for (const auto& from_decl : flow.froms()) {
+    from_decl.wire(*this);
+  }
+  for (const auto& sink_decl : flow.sinks()) {
+    if (sink_decl.specialize) {
+      sink_decl.specialize(*this, plan);
+    } else {
+      sink_decl.wire(*this);
+    }
+  }
+  plan.finalize();
 }
 
 void FlowRuntime::run_sources(const Flow& flow, std::chrono::milliseconds duration) {

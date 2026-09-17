@@ -39,6 +39,7 @@
 namespace tianshu::dsl {
 
 class FlowRuntime;
+class SpecializeBuilder;
 
 namespace detail {
 // Defined in dsl_runtime.h AFTER FlowRuntime is complete: the lambda
@@ -53,10 +54,23 @@ template <typename TIn, typename TOut>
 std::function<void(FlowRuntime&)> make_map_wire(std::string in_channel, std::string out_channel,
                                                 std::function<TOut(const TIn&)> fn);
 
+// Specialize-hook factories (ADR-0032): the typed second wiring
+// closure carried by every map/join/sink declaration; defined in
+// dsl_runtime.h alongside make_map_wire (same dual-declaration
+// discipline).
+template <typename TIn, typename TOut>
+std::function<void(FlowRuntime&, SpecializeBuilder&)> make_map_specialize(
+    std::string in_channel, std::string out_channel, std::function<TOut(const TIn&)> fn);
+
 template <typename TA, typename TB, typename TC>
 std::function<void(FlowRuntime&)> make_join_wire(std::string in_a, std::string in_b,
                                                  std::string out_channel,
                                                  std::function<TC(const TA&, const TB&)> fn);
+
+template <typename TA, typename TB, typename TC>
+std::function<void(FlowRuntime&, SpecializeBuilder&)> make_join_specialize(
+    std::string in_a, std::string in_b, std::string out_channel,
+    std::function<TC(const TA&, const TB&)> fn);
 
 template <typename TIn, typename TOut, typename TOp>
 std::function<void(FlowRuntime&)> make_op_wire(std::string in_channel, std::string out_channel,
@@ -100,6 +114,10 @@ std::function<void(FlowRuntime&)> make_from_component2_wire(std::string registry
 
 template <typename T>
 std::function<void(FlowRuntime&)> make_sink_wire(
+    std::string channel, std::function<void(const T&, const core::Lineage&)> fn);
+
+template <typename T>
+std::function<void(FlowRuntime&, SpecializeBuilder&)> make_sink_specialize(
     std::string channel, std::function<void(const T&, const core::Lineage&)> fn);
 }  // namespace detail
 
@@ -157,6 +175,9 @@ class Flow {
     std::string out_type_name;
     // Wiring installer: attaches the transformation to the runtime.
     std::function<void(FlowRuntime& rt)> wire;
+    // Specialized installer (ADR-0032): typed closure that hands the
+    // operator to a SpecializeBuilder instead of replaying wire().
+    std::function<void(FlowRuntime& rt, SpecializeBuilder& plan)> specialize;
   };
   struct JoinDecl {
     std::string in_channel_a;
@@ -166,6 +187,7 @@ class Flow {
     std::string type_name_b;
     std::string out_type_name;
     std::function<void(FlowRuntime& rt)> wire;
+    std::function<void(FlowRuntime& rt, SpecializeBuilder& plan)> specialize;
   };
   struct OpDecl {
     std::string in_channel;
@@ -202,6 +224,7 @@ class Flow {
     std::string channel;
     std::string type_name;
     std::function<void(FlowRuntime& rt)> wire;
+    std::function<void(FlowRuntime& rt, SpecializeBuilder& plan)> specialize;
   };
 
   [[nodiscard]] const std::string& name() const { return name_; }
@@ -785,9 +808,12 @@ inline bool is_registered_flow(const std::string& name) {
 template <typename TIn, typename TOut>
 Stream<TOut> FlowBuilder::map_stream(const Stream<TIn>& in, std::function<TOut(const TIn&)> fn) {
   const std::string out = anon_channel();
-  Flow::MapDecl decl{in.channel(), out, in.type_name(),
+  Flow::MapDecl decl{in.channel(),
+                     out,
+                     in.type_name(),
                      std::string(core::MessageTraits<TOut>::name()),
-                     detail::make_map_wire<TIn, TOut>(in.channel(), out, std::move(fn))};
+                     detail::make_map_wire<TIn, TOut>(in.channel(), out, fn),
+                     detail::make_map_specialize<TIn, TOut>(in.channel(), out, std::move(fn))};
   maps_.push_back(std::move(decl));
   return Stream<TOut>(out, std::string(core::MessageTraits<TOut>::name()));
 }
@@ -796,9 +822,12 @@ template <typename TIn, typename TOut>
 Stream<TOut> FlowBuilder::map_stream_to(const Stream<TIn>& in, std::string_view out_name,
                                         std::function<TOut(const TIn&)> fn) {
   const std::string out = channel_for(out_name);
-  Flow::MapDecl decl{in.channel(), out, in.type_name(),
+  Flow::MapDecl decl{in.channel(),
+                     out,
+                     in.type_name(),
                      std::string(core::MessageTraits<TOut>::name()),
-                     detail::make_map_wire<TIn, TOut>(in.channel(), out, std::move(fn))};
+                     detail::make_map_wire<TIn, TOut>(in.channel(), out, fn),
+                     detail::make_map_specialize<TIn, TOut>(in.channel(), out, std::move(fn))};
   maps_.push_back(std::move(decl));
   return Stream<TOut>(out, std::string(core::MessageTraits<TOut>::name()));
 }
@@ -806,8 +835,8 @@ Stream<TOut> FlowBuilder::map_stream_to(const Stream<TIn>& in, std::string_view 
 template <typename T>
 void FlowBuilder::sink_stream(const Stream<T>& in,
                               std::function<void(const T&, const core::Lineage&)> fn) {
-  Flow::SinkDecl decl{in.channel(), in.type_name(),
-                      detail::make_sink_wire<T>(in.channel(), std::move(fn))};
+  Flow::SinkDecl decl{in.channel(), in.type_name(), detail::make_sink_wire<T>(in.channel(), fn),
+                      detail::make_sink_specialize<T>(in.channel(), std::move(fn))};
   sinks_.push_back(std::move(decl));
 }
 
@@ -826,14 +855,16 @@ template <typename TA, typename TB, typename TC>
 FlowChain<TC> FlowBuilder::join(const FlowChain<TA>& a, const FlowChain<TB>& b,
                                 std::function<TC(const TA&, const TB&)> fn) {
   const std::string out = anon_channel();
-  Flow::JoinDecl decl{a.stream_.channel(),
-                      b.stream_.channel(),
-                      out,
-                      a.stream_.type_name(),
-                      b.stream_.type_name(),
-                      std::string(core::MessageTraits<TC>::name()),
-                      detail::make_join_wire<TA, TB, TC>(a.stream_.channel(), b.stream_.channel(),
-                                                         out, std::move(fn))};
+  Flow::JoinDecl decl{
+      a.stream_.channel(),
+      b.stream_.channel(),
+      out,
+      a.stream_.type_name(),
+      b.stream_.type_name(),
+      std::string(core::MessageTraits<TC>::name()),
+      detail::make_join_wire<TA, TB, TC>(a.stream_.channel(), b.stream_.channel(), out, fn),
+      detail::make_join_specialize<TA, TB, TC>(a.stream_.channel(), b.stream_.channel(), out,
+                                               std::move(fn))};
   joins_.push_back(std::move(decl));
   return FlowChain<TC>(this, Stream<TC>(out, std::string(core::MessageTraits<TC>::name())));
 }

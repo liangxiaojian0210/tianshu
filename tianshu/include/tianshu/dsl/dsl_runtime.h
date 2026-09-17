@@ -41,9 +41,11 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "tianshu/base/cache_buffer.h"
 #include "tianshu/base/small_vector.h"
 #include "tianshu/base/spin_lock.h"
 #include "tianshu/core/component.h"
@@ -58,6 +60,8 @@
 #include "tianshu/transport/transport_backend.h"
 
 namespace tianshu::dsl {
+
+class SpecializeBuilder;
 
 // Op publish handle (ADR-0024): bound to one output channel of the op.
 // Valid ONLY inside on_init/handle invocations; publish derives lineage
@@ -83,12 +87,20 @@ namespace detail {
 class StageHolder {
  public:
   virtual ~StageHolder() = default;
+  // The dispatcher owner token this stage registered under, so
+  // ~FlowRuntime can deregister before the buffers die (the
+  // dispatcher is a process-wide singleton; a runtime that never
+  // removes its sinks leaves dangling pointers that a later runtime
+  // publishing on the same channel id would call into).
+  [[nodiscard]] virtual const void* dispatcher_owner() const = 0;
 };
 
 template <typename... Ts>
-class VisitorStage : public StageHolder {
+class VisitorStage final : public StageHolder {
  public:
   explicit VisitorStage(std::unique_ptr<core::DataVisitor<Ts...>> v) : visitor(std::move(v)) {}
+
+  [[nodiscard]] const void* dispatcher_owner() const override { return visitor.get(); }
 
   std::unique_ptr<core::DataVisitor<Ts...>> visitor;
 };
@@ -163,14 +175,28 @@ class HistoryRing {
   std::deque<HistoryEntry> entries_;
 };
 
-// Bounded lineage lineage_queue: one per (stage, input channel). The publisher
-// pushes a copy to every lineage_queue registered on the channel; the owning
-// stage pops in its own consumption order.
-class LineageQueue {
+// Polymorphic lineage delivery sink (ADR-0032): one per (stage, input
+// channel). Generic stages register a locked LineageQueue; specialized
+// single-producer channels register a LineageInbox — the v0 cascade
+// consumes synchronously on the publishing thread (dispatch fires the
+// consumer notify inside the publish call), so the inbox trades the
+// mutex + node-allocating deque for plain ring stores. Multi-producer
+// channels (feedback edges, op/stateful/span/from outputs) keep the
+// locked queue because their writers may run on distinct threads.
+class LineageChannel {
+ public:
+  virtual ~LineageChannel() = default;
+  virtual void push(const core::Lineage& lineage) = 0;
+  virtual void push(core::Lineage&& lineage) = 0;
+  virtual core::Lineage pop() = 0;
+};
+
+// Bounded lineage queue: the generic-path LineageChannel.
+class LineageQueue final : public LineageChannel {
  public:
   explicit LineageQueue(std::size_t depth) : depth_(depth) {}
 
-  void push(const core::Lineage& lineage) {
+  void push(const core::Lineage& lineage) override {
     const std::scoped_lock lock(mutex_);
     queue_.push_back(lineage);
     if (queue_.size() > depth_) {
@@ -178,7 +204,7 @@ class LineageQueue {
     }
   }
 
-  void push(core::Lineage&& lineage) {
+  void push(core::Lineage&& lineage) override {
     const std::scoped_lock lock(mutex_);
     queue_.push_back(std::move(lineage));
     if (queue_.size() > depth_) {
@@ -186,7 +212,7 @@ class LineageQueue {
     }
   }
 
-  core::Lineage pop() {
+  core::Lineage pop() override {
     const std::scoped_lock lock(mutex_);
     if (queue_.empty()) {
       return {};
@@ -200,6 +226,55 @@ class LineageQueue {
   std::size_t depth_;
   mutable std::mutex mutex_;
   std::deque<core::Lineage> queue_;
+};
+
+// Single-writer bounded lineage ring (ADR-0032). Producer and consumer
+// run on the publishing thread by the v0 synchronous-cascade
+// discipline; head/tail atomics give the acquire/release pairing for
+// the cross-thread join case (a join's fused drain may run on either
+// input's producer thread; the join stage's single-flight guard
+// serializes drains, so there is at most one logical consumer).
+class LineageInbox final : public LineageChannel {
+ public:
+  explicit LineageInbox(std::size_t depth) : capacity_(depth == 0 ? 1 : depth), ring_(capacity_) {}
+
+  void push(const core::Lineage& lineage) override {
+    const std::size_t tail = tail_.load(std::memory_order_relaxed);
+    const std::size_t head = head_.load(std::memory_order_acquire);
+    if (tail - head == capacity_) {
+      // Depth-bounded like LineageQueue: drop the oldest entry.
+      head_.store(head + 1, std::memory_order_release);
+    }
+    ring_[tail % capacity_] = lineage;
+    tail_.store(tail + 1, std::memory_order_release);
+  }
+
+  void push(core::Lineage&& lineage) override {
+    const std::size_t tail = tail_.load(std::memory_order_relaxed);
+    const std::size_t head = head_.load(std::memory_order_acquire);
+    if (tail - head == capacity_) {
+      head_.store(head + 1, std::memory_order_release);
+    }
+    ring_[tail % capacity_] = std::move(lineage);
+    tail_.store(tail + 1, std::memory_order_release);
+  }
+
+  core::Lineage pop() override {
+    const std::size_t head = head_.load(std::memory_order_relaxed);
+    const std::size_t tail = tail_.load(std::memory_order_acquire);
+    if (head == tail) {
+      return {};
+    }
+    core::Lineage lineage = std::move(ring_[head % capacity_]);
+    head_.store(head + 1, std::memory_order_release);
+    return lineage;
+  }
+
+ private:
+  std::size_t capacity_;
+  std::vector<core::Lineage> ring_;
+  std::atomic<std::size_t> head_{0};
+  std::atomic<std::size_t> tail_{0};
 };
 
 }  // namespace detail
@@ -217,6 +292,8 @@ class FlowRuntime {
 
   template <typename U>
   friend class OpPub;
+
+  friend class SpecializeBuilder;
 
   // Copies `lineage` to every consumer lineage_queue on `channel`, captures
   // the message into the channel's bounded history, then cascades the
@@ -491,12 +568,38 @@ class FlowRuntime {
   // its own specialized wiring, then drive the same run loop.
   void wire(const Flow& flow);
 
+  // Specialized wiring (ADR-0032): installs per-message fast stages for
+  // closed single-producer map/join channels and generic stages for
+  // everything else. Byte-equivalent outputs and lineage vs wire()
+  // (H1), with the generic per-hop machinery (seq mutex, queue
+  // deque allocs, context hash) eliminated on the fast path.
+  void wire_specialized(const Flow& flow);
+
+  // Begin a specialized install driven by the caller (the compiled
+  // artifact's install function): returns the builder that computes
+  // the per-channel plan from the flow and constructs the stages.
+  SpecializeBuilder begin_specialize(const Flow& flow);
+
   // Run half: fires bootstrap hooks (ADR-0024), drives sources for
   // `duration`, quiesces referenced timer components. Call after some
-  // form of wiring (wire() or a compiled install).
+  // form of wiring (wire() / wire_specialized() / a compiled install).
   void run_sources(const Flow& flow, std::chrono::milliseconds duration);
 
+  // Live-recorder state for the fast-path fallback check (ADR-0032):
+  // while armed, specialized stages route their fan-out through the
+  // generic publish path so record files stay byte-identical to an
+  // interpreted run.
+  [[nodiscard]] bool recording_active() const {
+    return recording_active_.load(std::memory_order_relaxed);
+  }
+
  private:
+  // Creates a lineage delivery slot owned by the runtime and registers
+  // it for `channel` so publish_bytes fans lineage copies to it. The
+  // specialized install path uses this instead of the shared_ptr
+  // register_lineage_queue so inbox/queue choice follows the plan.
+  detail::LineageChannel* register_specialized_slot(const std::string& channel, bool inbox);
+
   // Creates a lineage_queue owned by the runtime and registers it for
   // `channel` so publish_bytes fans lineage copies to it.
   std::shared_ptr<detail::LineageQueue> register_lineage_queue(const std::string& channel);
@@ -534,6 +637,11 @@ class FlowRuntime {
 
   std::vector<std::unique_ptr<detail::StageHolder>> stages_;
   std::vector<std::shared_ptr<detail::LineageQueue>> lineage_queues_;
+  // Slots created by the specialized install path (ADR-0032): inboxes
+  // for single-producer channels, queues otherwise. Declared after
+  // stages_ so the stages (which read their slot during notifies) are
+  // destroyed first.
+  std::vector<std::unique_ptr<detail::LineageChannel>> owned_slots_;
   std::vector<std::function<void()>> init_hooks_;
 
   // Referenced-component plumbing (ADR-0025). Declaration order matters:
@@ -543,20 +651,42 @@ class FlowRuntime {
   std::vector<std::shared_ptr<core::ComponentBase>> components_;
 
   mutable std::mutex mutex_;
-  std::unordered_map<std::string, std::vector<detail::LineageQueue*>> channel_queues_;
+  std::unordered_map<std::string, std::vector<detail::LineageChannel*>> channel_queues_;
   std::unordered_map<std::string, std::uint64_t> seq_counters_;
   std::unordered_map<std::string, detail::HistoryRing> histories_;
+
+  // History-capture narrowing (ADR-0032): a specialized install fills
+  // this with the channels that have graph-declared observers (span
+  // data channels, stateful state channels); resolve_publish_ctx turns
+  // it into PublishCtx::history_on. Empty (generic wire()) = capture
+  // everything, preserving the interpreted reference behavior.
+  std::unordered_set<std::string> history_observers_;
+
+  // Publish-snapshot epoch (ADR-0032): bumped at every pub_ctx_
+  // replacement; the thread-local pointer-identity cache in
+  // resolve_publish_ctx validates against it to stay coherent across
+  // wiring rounds and recorder arming.
+  std::atomic<std::uint64_t> ctx_epoch_{0};
+
+  // Recorder-armed flag for the fast-path fallback (see
+  // recording_active()); relaxed loads on the hot path, benign
+  // in-flight-capture semantics while arming (same as generic).
+  std::atomic<bool> recording_active_{false};
 
   // Single-lookup publish context per channel (ADR-0030 D8 L1):
   // resolved lazily on first publish, cleared at the top of wire()
   // because new wiring can add consumers to existing channels.
   struct PublishCtx {
     core::ChannelId id{0};
-    std::vector<detail::LineageQueue*> queues;
+    std::vector<detail::LineageChannel*> queues;
     detail::HistoryRing* history{nullptr};
     std::uint16_t rec_ch{0};
     bool recorded{false};
     bool resolved{false};
+    // History capture gate (ADR-0032): false only on specialized runs
+    // for channels with no graph-declared observer; generic wiring
+    // leaves it true unconditionally.
+    bool history_on{true};
     // Feedback channels (map_to write-back) have two concurrent writers:
     // the seed source thread and the loop-carrying cascade thread. The
     // per-channel push section runs under this lock (ADR-0030 D8 L1b);
@@ -596,6 +726,366 @@ template <typename T>
 void OpPub<T>::publish(const T& msg) {
   rt_->publish_op(channel_, &msg, sizeof(T), parent_);
 }
+
+namespace detail {
+
+// Fan-out targets of a fast producer, resolved by the builder's
+// finalize() once every consumer slot is registered (ADR-0032).
+struct FanBinding {
+  core::ChannelId id{0};
+  HistoryRing* history{nullptr};  // null when capture is narrowed off
+  std::vector<LineageChannel*> slots;
+};
+
+class FastStageBase {
+ public:
+  virtual ~FastStageBase() = default;
+  virtual void bind_fan(FanBinding binding) = 0;
+  [[nodiscard]] virtual const std::string& out_channel() const = 0;
+};
+
+// Specialized map stage (ADR-0032): the same DataVisitor + dispatcher
+// registration as attach_map, but the per-hop cascade is a straight
+// line — lineage popped from the input slot, the operator invoked
+// (through the raw pointer when the fn was captureless), one hop
+// appended with the stage's own single-writer seq counter, and the
+// fan-out performed with install-time constants. While the recorder is
+// armed the fan routes through publish_bytes so record files stay
+// byte-identical to an interpreted run.
+template <typename TIn, typename TOut>
+class FastMapStage final : public StageHolder, public FastStageBase {
+ public:
+  using RawFn = TOut (*)(const TIn&);
+
+  FastMapStage(FlowRuntime& rt, const std::string& in_channel, std::string out_channel,
+               std::function<TOut(const TIn&)> fn, LineageChannel* slot, std::size_t depth)
+      : rt_(rt), out_channel_(std::move(out_channel)), slot_(slot) {
+    fn_ = std::move(fn);
+    const RawFn* raw = fn_.template target<RawFn>();
+    raw_fn_ = raw != nullptr ? *raw : nullptr;
+    buffer_ = std::make_unique<base::CacheBuffer<TIn>>(depth);
+    core::DataDispatcher::instance().add_buffer(
+        core::channel_id_for(in_channel), buffer_.get(),
+        [this] {
+          while (TIn* msg = buffer_->try_fetch()) {
+            core::Lineage parent = slot_->pop();
+            TOut out = raw_fn_ != nullptr ? raw_fn_(*msg) : fn_(*msg);
+            fan(std::move(parent), &out, sizeof(TOut));
+          }
+        },
+        this);
+  }
+
+  void bind_fan(FanBinding binding) override {
+    out_id_ = binding.id;
+    history_ = binding.history;
+    slots_ = std::move(binding.slots);
+  }
+
+  [[nodiscard]] const std::string& out_channel() const override { return out_channel_; }
+  [[nodiscard]] const void* dispatcher_owner() const override { return this; }
+
+ private:
+  void fan(core::Lineage parent, const void* data, std::size_t size) {
+    const std::uint64_t seq = seq_++;
+    parent.add_hop(core::LineageHop{.channel = out_channel_, .seq = seq});
+    if (rt_.recording_active()) {
+      rt_.publish_bytes(out_channel_, data, size, std::move(parent));
+      return;
+    }
+    if (history_ != nullptr) {
+      history_->push(seq, data, size, parent);
+    }
+    for (std::size_t i = 0; i + 1 < slots_.size(); ++i) {
+      slots_[i]->push(parent);
+    }
+    if (!slots_.empty()) {
+      slots_.back()->push(std::move(parent));
+    }
+    core::DataDispatcher::instance().dispatch(out_id_, data, size);
+  }
+
+  FlowRuntime& rt_;
+  std::string out_channel_;
+  LineageChannel* slot_;
+  std::function<TOut(const TIn&)> fn_;
+  RawFn raw_fn_{nullptr};
+  std::unique_ptr<base::CacheBuffer<TIn>> buffer_;
+  core::ChannelId out_id_{0};
+  HistoryRing* history_{nullptr};
+  std::vector<LineageChannel*> slots_;
+  std::uint64_t seq_{0};
+};
+
+// Specialized join stage (ADR-0032): the dual-input DataVisitor fused
+// discipline (fire only when both buffers are non-empty, consume one of
+// each) with lineage merged a-then-b exactly like attach_join. The
+// single-flight guard serializes concurrent fused firings from the two
+// producer threads; the loop then drains every ready pair under one
+// guard acquisition.
+template <typename TA, typename TB, typename TC>
+class FastJoinStage final : public StageHolder, public FastStageBase {
+ public:
+  using RawFn = TC (*)(const TA&, const TB&);
+
+  FastJoinStage(FlowRuntime& rt, const std::string& in_a, const std::string& in_b,
+                std::string out_channel, std::function<TC(const TA&, const TB&)> fn,
+                LineageChannel* slot_a, LineageChannel* slot_b, std::size_t depth)
+      : rt_(rt), out_channel_(std::move(out_channel)), slot_a_(slot_a), slot_b_(slot_b) {
+    fn_ = std::move(fn);
+    const RawFn* raw = fn_.template target<RawFn>();
+    raw_fn_ = raw != nullptr ? *raw : nullptr;
+    const auto box = std::make_shared<core::DataVisitor<TA, TB>*>(nullptr);
+    visitor_ = std::make_unique<core::DataVisitor<TA, TB>>(in_a, in_b, depth, [this, box] {
+      if (*box == nullptr || drain_guard_.test_and_set(std::memory_order_acquire)) {
+        return;
+      }
+      while (true) {
+        TA* a = (*box)->try_fetch_0();
+        if (a == nullptr) {
+          break;
+        }
+        TB* b = (*box)->try_fetch_1();
+        if (b == nullptr) {
+          break;
+        }
+        core::Lineage merged = slot_a_->pop();
+        merged.merge(slot_b_->pop());
+        TC out = raw_fn_ != nullptr ? raw_fn_(*a, *b) : fn_(*a, *b);
+        fan(std::move(merged), &out, sizeof(TC));
+      }
+      drain_guard_.clear(std::memory_order_release);
+    });
+    *box = visitor_.get();
+  }
+
+  void bind_fan(FanBinding binding) override {
+    out_id_ = binding.id;
+    history_ = binding.history;
+    slots_ = std::move(binding.slots);
+  }
+
+  [[nodiscard]] const std::string& out_channel() const override { return out_channel_; }
+  [[nodiscard]] const void* dispatcher_owner() const override { return visitor_.get(); }
+
+ private:
+  void fan(core::Lineage merged, const void* data, std::size_t size) {
+    const std::uint64_t seq = seq_++;
+    merged.add_hop(core::LineageHop{.channel = out_channel_, .seq = seq});
+    if (rt_.recording_active()) {
+      rt_.publish_bytes(out_channel_, data, size, std::move(merged));
+      return;
+    }
+    if (history_ != nullptr) {
+      history_->push(seq, data, size, merged);
+    }
+    for (std::size_t i = 0; i + 1 < slots_.size(); ++i) {
+      slots_[i]->push(merged);
+    }
+    if (!slots_.empty()) {
+      slots_.back()->push(std::move(merged));
+    }
+    core::DataDispatcher::instance().dispatch(out_id_, data, size);
+  }
+
+  FlowRuntime& rt_;
+  std::string out_channel_;
+  LineageChannel* slot_a_;
+  LineageChannel* slot_b_;
+  std::function<TC(const TA&, const TB&)> fn_;
+  RawFn raw_fn_{nullptr};
+  std::unique_ptr<core::DataVisitor<TA, TB>> visitor_;
+  core::ChannelId out_id_{0};
+  HistoryRing* history_{nullptr};
+  std::vector<LineageChannel*> slots_;
+  std::uint64_t seq_{0};
+  std::atomic_flag drain_guard_;
+};
+
+// Specialized sink stage (ADR-0032): terminal consumer, no fan.
+template <typename T>
+class FastSinkStage final : public StageHolder {
+ public:
+  FastSinkStage(const std::string& channel, std::function<void(const T&, const core::Lineage&)> fn,
+                LineageChannel* slot, std::size_t depth)
+      : slot_(slot) {
+    fn_ = std::move(fn);
+    buffer_ = std::make_unique<base::CacheBuffer<T>>(depth);
+    core::DataDispatcher::instance().add_buffer(
+        core::channel_id_for(channel), buffer_.get(),
+        [this] {
+          while (T* msg = buffer_->try_fetch()) {
+            fn_(*msg, slot_->pop());
+          }
+        },
+        this);
+  }
+
+  [[nodiscard]] const void* dispatcher_owner() const override { return this; }
+
+ private:
+  LineageChannel* slot_;
+  std::function<void(const T&, const core::Lineage&)> fn_;
+  std::unique_ptr<base::CacheBuffer<T>> buffer_;
+};
+
+}  // namespace detail
+
+// Specialized install driver (ADR-0032). The plan is computed from the
+// Flow itself — the same declaration graph the interpreter walks — so
+// there is no IR/runtime drift by construction:
+//   - fast_fan(channel): exactly one producer, of kind map or join,
+//     and the flow declares no SLA endpoints (v0 keeps SLA-bearing
+//     flows fully generic so histogram semantics are trivially exact);
+//   - inbox vs queue per input: single-producer channels deliver
+//     through the lock-free LineageInbox, multi-producer channels keep
+//     the locked LineageQueue;
+//   - op/stateful/span/from stages always install generically; their
+//     outputs are multi-writer or OpPub-published channels.
+class SpecializeBuilder {
+ public:
+  template <typename TIn, typename TOut>
+  void add_map(const std::string& in_channel, const std::string& out_channel,
+               std::function<TOut(const TIn&)> fn) {
+    if (!fast_fan(out_channel)) {
+      rt_.attach_map<TIn, TOut>(in_channel, out_channel, std::move(fn));
+      return;
+    }
+    auto* slot = rt_.register_specialized_slot(in_channel, inbox_input(in_channel));
+    auto stage = std::make_unique<detail::FastMapStage<TIn, TOut>>(
+        rt_, in_channel, out_channel, std::move(fn), slot, FlowRuntime::kQueueDepth);
+    fast_stages_.push_back(stage.get());
+    rt_.stages_.push_back(std::move(stage));
+  }
+
+  template <typename TA, typename TB, typename TC>
+  void add_join(const std::string& in_a, const std::string& in_b, const std::string& out_channel,
+                std::function<TC(const TA&, const TB&)> fn) {
+    if (!fast_fan(out_channel)) {
+      rt_.attach_join<TA, TB, TC>(in_a, in_b, out_channel, std::move(fn));
+      return;
+    }
+    auto* slot_a = rt_.register_specialized_slot(in_a, inbox_input(in_a));
+    auto* slot_b = rt_.register_specialized_slot(in_b, inbox_input(in_b));
+    auto stage = std::make_unique<detail::FastJoinStage<TA, TB, TC>>(
+        rt_, in_a, in_b, out_channel, std::move(fn), slot_a, slot_b, FlowRuntime::kQueueDepth);
+    fast_stages_.push_back(stage.get());
+    rt_.stages_.push_back(std::move(stage));
+  }
+
+  template <typename T>
+  void add_sink(const std::string& channel,
+                std::function<void(const T&, const core::Lineage&)> fn) {
+    auto* slot = rt_.register_specialized_slot(channel, inbox_input(channel));
+    rt_.stages_.push_back(std::make_unique<detail::FastSinkStage<T>>(channel, std::move(fn), slot,
+                                                                     FlowRuntime::kQueueDepth));
+  }
+
+  // Binds every fast producer's fan-out now that all consumers are
+  // registered: channel_queues_ holds the full consumer list in wire
+  // order (inboxes and generic queues alike), and the forced context
+  // resolution freezes id / history pointer for the channel.
+  void finalize() {
+    if (all_generic_) {
+      return;
+    }
+    for (auto* stage : fast_stages_) {
+      const FlowRuntime::PublishCtx& ctx = rt_.resolve_publish_ctx(stage->out_channel());
+      detail::FanBinding binding;
+      binding.id = ctx.id;
+      binding.history = history_on(stage->out_channel()) ? ctx.history : nullptr;
+      const auto found = rt_.channel_queues_.find(stage->out_channel());
+      if (found != rt_.channel_queues_.end()) {
+        binding.slots = found->second;
+      }
+      stage->bind_fan(std::move(binding));
+    }
+  }
+
+ private:
+  friend class FlowRuntime;
+
+  SpecializeBuilder(FlowRuntime& rt, const Flow& flow) : rt_(rt) {
+    all_generic_ = !flow.sla_endpoints().empty();
+    if (all_generic_) {
+      return;
+    }
+    std::unordered_map<std::string, std::string> producer_kind;
+    const auto produce = [&producer_kind](const std::string& channel, const char* kind) {
+      const auto [it, inserted] = producer_kind.try_emplace(channel, kind);
+      if (!inserted) {
+        it->second = "multi";
+      }
+    };
+    for (const auto& source : flow.sources()) {
+      produce(source.channel, "source");
+    }
+    for (const auto& map_decl : flow.maps()) {
+      produce(map_decl.out_channel, "map");
+    }
+    for (const auto& join_decl : flow.joins()) {
+      produce(join_decl.out_channel, "join");
+    }
+    for (const auto& op_decl : flow.ops()) {
+      produce(op_decl.out_channel, "op");
+    }
+    for (const auto& st_decl : flow.statefuls()) {
+      produce(st_decl.out_channel, "stateful");
+      produce(st_decl.state_channel, "stateful");
+    }
+    for (const auto& span_decl : flow.spans()) {
+      produce(span_decl.out_channel, "span");
+    }
+    for (const auto& from_decl : flow.froms()) {
+      produce(from_decl.out_channel, "from");
+    }
+    producer_kind_ = std::move(producer_kind);
+    for (const auto& span_decl : flow.spans()) {
+      history_observers_.insert(span_decl.data_channel);
+    }
+    for (const auto& st_decl : flow.statefuls()) {
+      history_observers_.insert(st_decl.state_channel);
+    }
+  }
+
+  [[nodiscard]] bool fast_fan(const std::string& channel) const {
+    if (all_generic_) {
+      return false;
+    }
+    const auto it = producer_kind_.find(channel);
+    return it != producer_kind_.end() && (it->second == "map" || it->second == "join");
+  }
+
+  [[nodiscard]] bool inbox_input(const std::string& channel) const {
+    const auto it = producer_kind_.find(channel);
+    if (it == producer_kind_.end()) {
+      // Tap / externally published channels: writer discipline is
+      // unknown, keep the locked queue.
+      return false;
+    }
+    if (it->second == "source") {
+      // One timer thread per source declaration (ADR-0021).
+      return true;
+    }
+    // Sole fast map/join producers run single-threaded by construction:
+    // linear cascades execute on the driving thread, joins are
+    // serialized by their single-flight guard. Generic stages
+    // (op/stateful/span/from) keep the locked queue even as sole
+    // producers — their handles can fire concurrently when fed by
+    // concurrent publishers.
+    return fast_fan(channel);
+  }
+
+  [[nodiscard]] bool history_on(const std::string& channel) const {
+    return history_observers_.contains(channel);
+  }
+
+  FlowRuntime& rt_;
+  bool all_generic_{false};
+  std::unordered_map<std::string, std::string> producer_kind_;
+  std::unordered_set<std::string> history_observers_;
+  std::vector<detail::FastStageBase*> fast_stages_;
+};
 
 namespace detail {
 
@@ -722,6 +1212,37 @@ std::function<void(FlowRuntime&)> make_sink_wire(
     std::string channel, std::function<void(const T&, const core::Lineage&)> fn) {
   return [channel = std::move(channel), fn = std::move(fn)](FlowRuntime& rt) {
     rt.template attach_sink<T>(channel, fn);
+  };
+}
+
+// Specialize-hook factories (ADR-0032): typed closures created where
+// the builder knows the message types; they hand the operator to the
+// SpecializeBuilder, which decides fast vs generic per channel.
+template <typename TIn, typename TOut>
+std::function<void(FlowRuntime&, SpecializeBuilder&)> make_map_specialize(
+    std::string in_channel, std::string out_channel, std::function<TOut(const TIn&)> fn) {
+  return [in_channel = std::move(in_channel), out_channel = std::move(out_channel),
+          fn = std::move(fn)](FlowRuntime& /*rt*/, SpecializeBuilder& plan) {
+    plan.template add_map<TIn, TOut>(in_channel, out_channel, fn);
+  };
+}
+
+template <typename TA, typename TB, typename TC>
+std::function<void(FlowRuntime&, SpecializeBuilder&)> make_join_specialize(
+    std::string in_a, std::string in_b, std::string out_channel,
+    std::function<TC(const TA&, const TB&)> fn) {
+  return [in_a = std::move(in_a), in_b = std::move(in_b), out_channel = std::move(out_channel),
+          fn = std::move(fn)](FlowRuntime& /*rt*/, SpecializeBuilder& plan) {
+    plan.template add_join<TA, TB, TC>(in_a, in_b, out_channel, fn);
+  };
+}
+
+template <typename T>
+std::function<void(FlowRuntime&, SpecializeBuilder&)> make_sink_specialize(
+    std::string channel, std::function<void(const T&, const core::Lineage&)> fn) {
+  return [channel = std::move(channel), fn = std::move(fn)](FlowRuntime& /*rt*/,
+                                                            SpecializeBuilder& plan) {
+    plan.template add_sink<T>(channel, fn);
   };
 }
 
