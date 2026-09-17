@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
@@ -35,6 +36,7 @@
 #include "tianshu/core/message_traits.h"
 #include "tianshu/dsl/dsl_runtime.h"
 #include "tianshu/dsl/flow.h"
+#include "tianshu/dsl/record_v2.h"
 #include "tianshu/sla/sla_analyzer.h"
 
 namespace {
@@ -268,4 +270,55 @@ TEST(SourceEntryH1, ObserverHistoryCapturedForObservedChannel) {
   }
   ASSERT_FALSE(interpreted.empty());
   expect_equal_captures(interpreted, typed, "observer history via span output");
+}
+
+// Recorder-armed runs: the entry falls back to publish_bytes per message
+// (ADR-0033 D4), so record files stay byte-identical to an interpreted
+// run of the same flow.
+TEST(SourceEntryH1, RecorderArmedFallsBackToGeneric) {
+  const char* path_i = "/tmp/tianshu_se_entry_rec_i.trec";
+  const char* path_s = "/tmp/tianshu_se_entry_rec_s.trec";
+  Capture interpreted;
+  Capture typed;
+  {
+    FlowRuntime rt;
+    const auto flow = make_chain("se_rec", 2, &interpreted);
+    rt.wire(flow);
+    rt.start_recording(path_i);
+    publish_generic(rt, flow, kMsgs);
+    ASSERT_TRUE(rt.stop_recording());
+  }
+  {
+    FlowRuntime rt;
+    const auto flow = make_chain("se_rec", 2, &typed);
+    rt.wire_specialized(flow);
+    rt.start_recording(path_s);
+    publish_typed(rt, flow, kMsgs);
+    ASSERT_TRUE(rt.stop_recording());
+  }
+  expect_equal_captures(interpreted, typed, "recording sink outputs");
+
+  std::vector<std::string> recorded_i;
+  std::vector<std::string> recorded_s;
+  const auto read_back = [](const char* path, std::vector<std::string>* out) {
+    auto reader_opt = tianshu::dsl::record::RecordReader::open(path);
+    if (!reader_opt.has_value()) {
+      return;
+    }
+    auto& reader = reader_opt.value();
+    tianshu::dsl::record::RecordedMessageV2 msg;
+    while (reader.next(&msg)) {
+      std::uint64_t seq = 0;
+      if (msg.payload.size() < sizeof(seq)) {
+        continue;
+      }
+      std::memcpy(&seq, msg.payload.data(), sizeof(seq));
+      out->push_back(std::to_string(msg.channel_id) + "#" + std::to_string(seq) + " @ " +
+                     (msg.lineage.has_value() ? msg.lineage.value().describe() : "<none>"));
+    }
+  };
+  read_back(path_i, &recorded_i);
+  read_back(path_s, &recorded_s);
+  ASSERT_FALSE(recorded_i.empty());
+  expect_equal_captures(recorded_i, recorded_s, "record content");
 }
