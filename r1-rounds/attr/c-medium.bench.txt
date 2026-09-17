@@ -1,0 +1,13 @@
+2026-09-17T12:14:58+08:00
+Running /home/foliage/ring/github.com/lykling/tianshu/build/desktop-release/bin/codegen_vs_handwritten
+Run on (24 X 1971.75 MHz CPU s)
+CPU Caches:
+  L1 Data 48 KiB (x12)
+  L1 Instruction 32 KiB (x12)
+  L2 Unified 1024 KiB (x12)
+  L3 Unified 16384 KiB (x3)
+Load Average: 3.59, 4.03, 4.35
+------------------------------------------------------------------------------
+Benchmark                    Time             CPU   Iterations UserCounters...
+------------------------------------------------------------------------------
+run_compiled/medium  550791407 ns    550165160 ns           25 hops=4 items_per_second=0/s p50_ns=441 p999_ns=611 p99_ns=490

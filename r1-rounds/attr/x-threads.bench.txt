@@ -1,0 +1,15 @@
+2026-09-17T12:25:23+08:00
+Running build/desktop-release/bin/codegen_vs_handwritten
+Run on (24 X 5157.9 MHz CPU s)
+CPU Caches:
+  L1 Data 48 KiB (x12)
+  L1 Instruction 32 KiB (x12)
+  L2 Unified 1024 KiB (x12)
+  L3 Unified 16384 KiB (x3)
+Load Average: 3.90, 3.98, 4.12
+***WARNING*** CPU scaling is enabled, the benchmark real time measurements may be noisy and will incur extra overhead.
+---------------------------------------------------------------------------------
+Benchmark                       Time             CPU   Iterations UserCounters...
+---------------------------------------------------------------------------------
+run_compiled/short      262858927 ns    262521858 ns            5 hops=1 items_per_second=0/s p50_ns=181 p999_ns=350 p99_ns=300
+run_handwritten/medium  390415790 ns    389968134 ns            4 hops=4 items_per_second=0/s p50_ns=271 p999_ns=501 p99_ns=431
