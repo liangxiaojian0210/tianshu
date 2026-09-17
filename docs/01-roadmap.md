@@ -61,7 +61,7 @@ M2 MVP 上车  →  M3 认证就绪
 | # | 假设 | 验证标准 | 失败兜底 |
 |---|---|---|---|
 | H1 | trace 能捕获所有数据流操作 | examples/* 全覆盖，输出与手写 100% 一致 | RAII guard 加强 + 显式 escape hatch |
-| H2 | codegen 产物性能 ≈ 手写 | 5 类典型链路 P99 差 ≤ max(1%, 2ns/跳)——同语义基线（金标准携带 lineage），绝对余量承认为类型擦除下限的间接调用物理残余（[ADR-0032](./adr/0032-per-message-specialization.md) D5 重校准，2026-09-17） | pass 调优；若仍不达标 → 方案回炉 |
+| H2 | codegen 产物性能 ≈ 手写 | **门语义 v3（[ADR-0034](./adr/0034-gate-semantics-v3.md)，2026-09-17）**：主承诺 = 加性分解 `diff ≤ F + k×跳数 + m×扇出支数`，k ≤ 2ns/跳（类型擦除地板，随 [ADR-0035](./adr/0035-per-fn-instantiation.md) 落地重论证）、F ≤ 20ns/消息、m 待定——空算子五形状（同语义基线，金标准携带 lineage）协议 v2 同轮差值直接量取；从承诺 = 每消息算子工作量 W ≥ (F+k×hops)/1% 时 P99 差 <1%（加性已实证：负载 ×18 差值恒定，r2-rounds/heavy*）。前史：ADR-0032 D5 的 max(1%, 2ns/跳) 为本语义前身 | pass 调优 + ADR-0035 算子直呼；若仍不达标 → 方案回炉 |
 | H3 | RTA 的 WCET 估计准确 | Apollo 实测 P99.9 × 1.0~1.3 | profile-guided 校准 |
 
 ### 1.1 最小可跑子集（4 周）

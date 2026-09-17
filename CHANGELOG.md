@@ -53,6 +53,28 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 Phase 1 PoC — in progress.
 
+### H2 gate semantics v3: additive promise + workload-conditioned percentage
+
+- ADR-0034 (accepted): the headline promise is now two-layer. Main:
+  compiled-vs-handwritten overhead is ADDITIVE, diff <= F + k*hops +
+  m*fanout-branches, with budgets k <= 2 ns/hop (type-erasure dispatch
+  floor, re-argued once ADR-0035 lands), F <= 20 ns/message (residual,
+  attribution pending), m TBD. Corollary: P99 difference < 1% holds
+  whenever per-message operator work W >= (F + k*hops)/1% — W measured
+  as the sum of operator-body execution times, bounded by the declared
+  WCET (ties into the ADR-0029 budget checks). Verdict reporting is
+  dual-track (percentage + (F,k,m) decomposition from same-round diffs).
+  Additivity proven empirically: an 18x workload probe left the absolute
+  diff constant at 150-190 ns (evidence r2-rounds/heavy*).
+- ADR-0035 (accepted, design; implementation next round): per-fn
+  stage instantiation — specialize hook factories become
+  make_map_specialize<TIn, TOut, F> with F the functor type known at
+  the FlowBuilder call site, so FastMap/Join/SinkStages call the
+  operator directly (inlinable) instead of through std::function. IR,
+  stable hash, and the .gen.cc artifact contract are unchanged.
+- README / overview / roadmap promise wording updated to the two-layer
+  semantics.
+
 ### DataVisitor notify captures stay inline (join path refcount churn)
 
 - data_visitor.h (all four arities): on_fuse is stored as a member and

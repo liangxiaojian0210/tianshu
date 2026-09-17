@@ -8,7 +8,7 @@
 
 ## 1. 一句话定位
 
-**天枢 (TIANSHU)** 是一种 **SLA 约束的声明式实时数据流编译框架**。开发者写声明式数据流，框架在加载期通过 trace + 静态 C++ codegen 编译为原生 DAG；验收目标为编译产物与相同语义的手写代码 P99 延迟差异 <1%（Phase 1 H2），声明层不引入额外运行时代价。
+**天枢 (TIANSHU)** 是一种 **SLA 约束的声明式实时数据流编译框架**。开发者写声明式数据流，框架在加载期通过 trace + 静态 C++ codegen 编译为原生 DAG；验收目标为编译产物相对同语义手写装配的额外延迟是**加性常数**（每跳 2ns 级，不随算子工作量与消息大小放大），算子工作量 W ≥ 常数/1% 时 P99 差 <1%（Phase 1 H2，[ADR-0034](./adr/0034-gate-semantics-v3.md) 两层语义）。
 
 定位类比：**MapReduce → Spark** 的范式跃迁，迁移到自动驾驶车端 ECU。
 
@@ -207,7 +207,7 @@ REGISTER_TRACEABLE_FLOW("perception_flow", perception_flow);
 | # | 假设 | 验证标准 | 失败兜底 |
 |---|---|---|---|
 | H1 | trace 能捕获所有数据流操作 | examples/* 全覆盖，输出与手写 100% 一致 | RAII guard 加强 + 显式 escape hatch |
-| H2 | codegen 产物性能 ≈ 手写 | 5 类典型链路 P99 差异 < 1% | 引入 pass 调优；若仍不达标则触发方案修订 |
+| H2 | codegen 产物性能 ≈ 手写 | 两层语义（[ADR-0034](./adr/0034-gate-semantics-v3.md)）：主承诺 = 加性分解 `diff ≤ F + k×跳数 + m×扇出支数`（k ≤ 2ns/跳、F ≤ 20ns/消息、m 待定），空算子五形状直接量取；从承诺 = W ≥ (F+k×hops)/1% 时 P99 差 <1% | 引入 pass 调优与 ADR-0035 算子直呼；若仍不达标则触发方案修订 |
 | H3 | RTA 的 WCET 估计准确 | Apollo 实测 P99.9 × 1.0 ~ 1.3 | profile-guided 校准 |
 
 任一假设失败 → **专利新颖性失效**，需要回炉。
