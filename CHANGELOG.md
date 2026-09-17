@@ -53,6 +53,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 Phase 1 PoC — in progress.
 
+### Direct single-writer lineage slots for linear channels (ADR-0036)
+
+- detail::DirectSlot: a plain-member single slot (no ring, no atomics,
+  no modulo) for linear fast channels — in a synchronous cascade the
+  push and its paired pop run on the same call stack, so the inbox
+  protocol was pure overhead. register_specialized_slot now takes a
+  slot kind from the channel plan: map/sink inputs get the direct
+  slot, join inputs keep the atomic inbox (their pop fires on a
+  different producer's stack — cross-thread pairing), everything else
+  keeps the locked queue. H1 unchanged (339 ctest + 33 bazel).
+- Measured (shielded, same-round diffs): linear shapes reach
+  noise-band PARITY with the handwritten baseline — p50 short 0-10 /
+  medium 11-29 / long 0-10 ns (two rounds had long exactly equal at
+  671 = 671), p99 within -10..+30; marginal per-hop overhead k drops
+  4.2 -> ~0-3 ns/hop, at/near the v3 budgets (k <= 2, F <= 20).
+  fan-in still +120-130 ns (the join concurrency contract: atomic
+  input pairing + single-flight guard + merge — a single-threaded
+  handwritten rig skips these; gold-alignment ruling pending) and
+  fan-out +50-71 ns (m ~= 10-17 ns/branch, attribution pending).
+
 ### Per-fn fast-stage instantiation — direct operator calls (ADR-0035)
 
 - FlowChain::map/map_to/sink and FlowBuilder::join now carry the

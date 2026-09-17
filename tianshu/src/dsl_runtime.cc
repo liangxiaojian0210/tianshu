@@ -363,12 +363,18 @@ std::shared_ptr<detail::LineageQueue> FlowRuntime::register_lineage_queue(
 }
 
 detail::LineageChannel* FlowRuntime::register_specialized_slot(const std::string& channel,
-                                                               bool inbox) {
+                                                               LineageSlotKind kind) {
   std::unique_ptr<detail::LineageChannel> slot;
-  if (inbox) {
-    slot = std::make_unique<detail::LineageInbox>(kQueueDepth * 2);
-  } else {
-    slot = std::make_unique<detail::LineageQueue>(kQueueDepth * 2);
+  switch (kind) {
+    case LineageSlotKind::kLockedQueue:
+      slot = std::make_unique<detail::LineageQueue>(kQueueDepth * 2);
+      break;
+    case LineageSlotKind::kAtomicInbox:
+      slot = std::make_unique<detail::LineageInbox>(kQueueDepth * 2);
+      break;
+    case LineageSlotKind::kDirectSlot:
+      slot = std::make_unique<detail::DirectSlot>();
+      break;
   }
   const std::scoped_lock lock(mutex_);
   pub_ctx_ = std::make_shared<const std::unordered_map<std::string, std::shared_ptr<PublishCtx>>>();

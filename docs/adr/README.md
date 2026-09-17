@@ -46,6 +46,7 @@
 | [0032](./0032-per-message-specialization.md) | M-C 逐消息特化：类型化宿主钩子与 H2 门槛重校准 | dsl | ✅ | D4 类型墙修正、Flow 自推导通道计划、LineageInbox、历史捕获收窄、录制回落、门槛 max(1%, 2ns/跳) |
 | [0034](./0034-gate-semantics-v3.md) | H2 门语义 v3：加性承诺与负载条件化百分比 | compiler | ✅ | 主承诺 diff≤F+k×跳+m×支（k≤2ns/F≤20ns/m待定）、从承诺 W≥(F+k·hops)/1% 时 <1%、判决双轨报告、加性实证 |
 | [0035](./0035-per-fn-instantiation.md) | 算子直呼：specialize 钩子 per-fn 实例化 | dsl | ✅ | make_*_specialize<TIn,TOut,F>、FastStage 增 F 模板参、IR/产物契约不变、地板重论证联动 0034 |
+| [0036](./0036-direct-slot.md) | 单写者直槽：线性通道免原子血缘交接 | dsl | ✅ | 同栈配对合法性、槽型三分（直槽/原子环/锁队列）、join 跨线程排除 |
 | [0033](./0033-typed-source-entry.md) | 类型化源入口：入口段特化与判决口径统一 | dsl | ✅ | 宿主侧 SourceEntry、FanBinding 同构冻结、录制回落、历史收窄、协议 v2 线程预热 |
 
 ## 域视图
@@ -53,6 +54,6 @@
 - **build**：0003 · 0004 · 0018
 - **infra**：0002 · 0005 · 0007 · 0009 · 0011 · 0012 · 0016 · 0017
 - **runtime**（transport/message/sched/lineage）：0008 · 0010 · 0013 · 0015 · 0019 · 0022 · 0023
-- **dsl/compiler**：0001 · 0021 · 0024 · 0025 · 0026 · 0027 · 0028 · 0029 · 0030 · 0031 · 0032 · 0033 · 0034 · 0035
+- **dsl/compiler**：0001 · 0021 · 0024 · 0025 · 0026 · 0027 · 0028 · 0029 · 0030 · 0031 · 0032 · 0033 · 0034 · 0035 · 0036
 - **gpu**：0006
 - **tooling**（ti 家族/console/monitor）：0014 · 0020

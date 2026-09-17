@@ -277,6 +277,25 @@ class LineageInbox final : public LineageChannel {
   std::atomic<std::size_t> tail_{0};
 };
 
+// Direct slot (ADR-0036): the linear-channel LineageChannel. In a
+// synchronous cascade the push and its paired pop run on the SAME call
+// stack (publish -> dispatch -> consumer notify), so a plain member
+// needs no ring, no atomics, and no modulo — the slot the handwritten
+// rig uses. A push while occupied (impossible under the discipline:
+// depth never exceeds 1) overwrites, matching the inbox's drop-oldest.
+// Join inputs must NOT use this: their pop fires on a different
+// producer's stack than the push (cross-thread pairing) — they keep
+// the atomic LineageInbox.
+class DirectSlot final : public LineageChannel {
+ public:
+  void push(const core::Lineage& lineage) override { value_ = lineage; }
+  void push(core::Lineage&& lineage) override { value_ = std::move(lineage); }
+  core::Lineage pop() override { return std::move(value_); }
+
+ private:
+  core::Lineage value_;
+};
+
 }  // namespace detail
 
 class FlowRuntime {
@@ -610,8 +629,13 @@ class FlowRuntime {
   // Creates a lineage delivery slot owned by the runtime and registers
   // it for `channel` so publish_bytes fans lineage copies to it. The
   // specialized install path uses this instead of the shared_ptr
-  // register_lineage_queue so inbox/queue choice follows the plan.
-  detail::LineageChannel* register_specialized_slot(const std::string& channel, bool inbox);
+  // register_lineage_queue so the slot kind follows the plan: linear
+  // map/sink consumers get the direct single-slot (ADR-0036, same-stack
+  // push/pop), join inputs keep the atomic inbox (cross-thread
+  // pairing), everything else keeps the locked queue.
+  enum class LineageSlotKind : std::uint8_t { kLockedQueue, kAtomicInbox, kDirectSlot };
+  detail::LineageChannel* register_specialized_slot(const std::string& channel,
+                                                    LineageSlotKind kind);
 
   // Creates a lineage_queue owned by the runtime and registers it for
   // `channel` so publish_bytes fans lineage copies to it.
@@ -960,7 +984,7 @@ class SpecializeBuilder {
       rt_.attach_map<TIn, TOut>(in_channel, out_channel, std::move(fn));
       return;
     }
-    auto* slot = rt_.register_specialized_slot(in_channel, inbox_input(in_channel));
+    auto* slot = rt_.register_specialized_slot(in_channel, linear_slot(in_channel));
     auto stage = std::make_unique<detail::FastMapStage<TIn, TOut, std::function<TOut(const TIn&)>>>(
         rt_, in_channel, out_channel, std::move(fn), slot, FlowRuntime::kQueueDepth);
     fast_stages_.push_back(stage.get());
@@ -977,7 +1001,7 @@ class SpecializeBuilder {
                                 std::function<TOut(const TIn&)>(std::move(fn)));
       return;
     }
-    auto* slot = rt_.register_specialized_slot(in_channel, inbox_input(in_channel));
+    auto* slot = rt_.register_specialized_slot(in_channel, linear_slot(in_channel));
     auto stage = std::make_unique<detail::FastMapStage<TIn, TOut, F>>(
         rt_, in_channel, out_channel, std::move(fn), slot, FlowRuntime::kQueueDepth);
     fast_stages_.push_back(stage.get());
@@ -991,8 +1015,8 @@ class SpecializeBuilder {
       rt_.attach_join<TA, TB, TC>(in_a, in_b, out_channel, std::move(fn));
       return;
     }
-    auto* slot_a = rt_.register_specialized_slot(in_a, inbox_input(in_a));
-    auto* slot_b = rt_.register_specialized_slot(in_b, inbox_input(in_b));
+    auto* slot_a = rt_.register_specialized_slot(in_a, join_slot(in_a));
+    auto* slot_b = rt_.register_specialized_slot(in_b, join_slot(in_b));
     auto stage = std::make_unique<
         detail::FastJoinStage<TA, TB, TC, std::function<TC(const TA&, const TB&)>>>(
         rt_, in_a, in_b, out_channel, std::move(fn), slot_a, slot_b, FlowRuntime::kQueueDepth);
@@ -1009,8 +1033,8 @@ class SpecializeBuilder {
                                   std::function<TC(const TA&, const TB&)>(std::move(fn)));
       return;
     }
-    auto* slot_a = rt_.register_specialized_slot(in_a, inbox_input(in_a));
-    auto* slot_b = rt_.register_specialized_slot(in_b, inbox_input(in_b));
+    auto* slot_a = rt_.register_specialized_slot(in_a, join_slot(in_a));
+    auto* slot_b = rt_.register_specialized_slot(in_b, join_slot(in_b));
     auto stage = std::make_unique<detail::FastJoinStage<TA, TB, TC, F>>(
         rt_, in_a, in_b, out_channel, std::move(fn), slot_a, slot_b, FlowRuntime::kQueueDepth);
     fast_stages_.push_back(stage.get());
@@ -1020,7 +1044,7 @@ class SpecializeBuilder {
   template <typename T>
   void add_sink(const std::string& channel,
                 std::function<void(const T&, const core::Lineage&)> fn) {
-    auto* slot = rt_.register_specialized_slot(channel, inbox_input(channel));
+    auto* slot = rt_.register_specialized_slot(channel, linear_slot(channel));
     rt_.stages_.push_back(
         std::make_unique<
             detail::FastSinkStage<T, std::function<void(const T&, const core::Lineage&)>>>(
@@ -1030,7 +1054,7 @@ class SpecializeBuilder {
   // Per-fn variant (ADR-0035), same discipline as add_map_fn.
   template <typename T, typename F>
   void add_sink_fn(const std::string& channel, F fn) {
-    auto* slot = rt_.register_specialized_slot(channel, inbox_input(channel));
+    auto* slot = rt_.register_specialized_slot(channel, linear_slot(channel));
     rt_.stages_.push_back(std::make_unique<detail::FastSinkStage<T, F>>(
         channel, std::move(fn), slot, FlowRuntime::kQueueDepth));
   }
@@ -1128,6 +1152,21 @@ class SpecializeBuilder {
     // producers — their handles can fire concurrently when fed by
     // concurrent publishers.
     return fast_fan(channel);
+  }
+
+  // Slot kinds (ADR-0036): a linear map/sink consumer pops on the same
+  // stack as the push, so it gets the atomic-free direct slot; a join
+  // input is popped from whichever producer's fused firing pairs it
+  // (cross-thread), so it keeps the atomic inbox; everything else or
+  // any multi-producer channel keeps the locked queue.
+  [[nodiscard]] FlowRuntime::LineageSlotKind linear_slot(const std::string& channel) const {
+    return inbox_input(channel) ? FlowRuntime::LineageSlotKind::kDirectSlot
+                                : FlowRuntime::LineageSlotKind::kLockedQueue;
+  }
+
+  [[nodiscard]] FlowRuntime::LineageSlotKind join_slot(const std::string& channel) const {
+    return inbox_input(channel) ? FlowRuntime::LineageSlotKind::kAtomicInbox
+                                : FlowRuntime::LineageSlotKind::kLockedQueue;
   }
 
   [[nodiscard]] bool history_on(const std::string& channel) const {
