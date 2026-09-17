@@ -15,7 +15,15 @@
 // H2 verdict rig (ADR-0030 D5, roadmap 1.3): the same chain shape run
 // three ways, one million messages each —
 //   handwritten : CacheBuffer + DataDispatcher wired by hand, no
-//                 FlowRuntime machinery (the gold standard)
+//                 FlowRuntime machinery (the gold standard). Carries
+//                 the same per-message lineage semantics as the DSL
+//                 (ADR-0032 gate recalibration): root at the source,
+//                 one hop per stage on the stage's output channel
+//                 with a per-channel seq, branch merge at joins, and
+//                 delivery into the sink callback — so the gate
+//                 measures the cost of the DECLARATION layer over a
+//                 handwritten implementation of the same semantics,
+//                 not the cost of lineage itself.
 //   interpreted : FlowBuilder -> FlowRuntime wiring (publish_bytes)
 //   compiled    : the pipeline's .so artifact installing its wiring
 // Per-message e2e is stamped into the payload at the source and
@@ -104,6 +112,12 @@ void report_percentiles(benchmark::State& state, const std::vector<std::uint64_t
 struct HandHop {
   CacheBuffer<BenchMsg> buf{16};
   std::function<void()> notify;
+  // Single-slot lineage inbox + per-output-channel seq counter: the
+  // handwritten mirror of the DSL's lineage discipline on the same
+  // synchronous-cascade assumption (consumer runs inside the
+  // producer's dispatch call).
+  Lineage slot;
+  std::uint64_t out_seq{0};
 };
 
 class HandChain {
@@ -124,9 +138,14 @@ class HandChain {
 
     for (std::size_t i = 0; i < hop_count; ++i) {
       const std::uint64_t next = tianshu::core::channel_id_for(channels_[i + 1]);
-      hops_[i]->notify = [this, i, next] {
-        while (BenchMsg* msg = hops_[i]->buf.try_fetch()) {
+      const std::string& out_ch = channels_[i + 1];
+      HandHop* dst = i + 1 < hop_count ? hops_[i + 1].get() : sink_.get();
+      hops_[i]->notify = [this, i, next, &out_ch, dst] {
+        while (const BenchMsg* msg = hops_[i]->buf.try_fetch()) {
           const BenchMsg out = transform(*msg);
+          Lineage lin = std::move(hops_[i]->slot);
+          lin.add_hop({.channel = out_ch, .seq = ++hops_[i]->out_seq});
+          dst->slot = std::move(lin);
           DataDispatcher::instance().dispatch(next, &out, sizeof(out));
         }
       };
@@ -134,7 +153,9 @@ class HandChain {
                             hops_[i]->notify, owner_);
     }
     sink_->notify = [this] {
-      while (BenchMsg* msg = sink_->buf.try_fetch()) {
+      while (const BenchMsg* msg = sink_->buf.try_fetch()) {
+        const Lineage& received = sink_->slot;
+        static_cast<void>(received);
         sink_latencies_.push_back(now_ns() - msg->born_ns);
       }
     };
@@ -146,8 +167,10 @@ class HandChain {
 
   void drive(std::size_t messages) {
     const std::uint64_t first = tianshu::core::channel_id_for(channels_.front());
+    const std::string& first_ch = channels_.front();
     for (std::size_t i = 0; i < messages; ++i) {
       const BenchMsg msg{.born_ns = now_ns(), .seq = static_cast<std::uint64_t>(i)};
+      hops_.front()->slot = Lineage::rooted(first_ch, static_cast<std::uint64_t>(i));
       DataDispatcher::instance().dispatch(first, &msg, sizeof(msg));
     }
   }
@@ -163,32 +186,43 @@ class HandChain {
 // Handwritten fan-in joiner: a staging slot per input, paired on arrival.
 // try_fetch() consumes, so an input is only fetched after its notify fired
 // (the buffer is non-empty then) and messages wait in slots, never
-// re-queued.
+// re-queued. Lineage mirrors the DSL join: pop both input branches
+// (a then b), merge, then one hop on the output channel.
 struct HandJoin {
   CacheBuffer<BenchMsg> in_a{16};
   CacheBuffer<BenchMsg> in_b{16};
   std::optional<BenchMsg> slot_a;
   std::optional<BenchMsg> slot_b;
+  Lineage lin_a;
+  Lineage lin_b;
+  Lineage out_slot;
+  std::uint64_t out_seq{0};
 
-  void step_a(std::uint64_t next) {
+  void step_a(std::uint64_t next, Lineage* dst_slot, const std::string* out_ch) {
     while (const BenchMsg* p = in_a.try_fetch()) {
       slot_a = *p;
-      try_emit(next);
+      try_emit(next, dst_slot, out_ch);
     }
   }
 
-  void step_b(std::uint64_t next) {
+  void step_b(std::uint64_t next, Lineage* dst_slot, const std::string* out_ch) {
     while (const BenchMsg* p = in_b.try_fetch()) {
       slot_b = *p;
-      try_emit(next);
+      try_emit(next, dst_slot, out_ch);
     }
   }
 
-  void try_emit(std::uint64_t next) {
+  void try_emit(std::uint64_t next, Lineage* dst_slot, const std::string* out_ch) {
     if (!slot_a.has_value() || !slot_b.has_value()) {
       return;
     }
     const BenchMsg out = fuse(*slot_a, *slot_b);
+    Lineage merged = std::move(lin_a);
+    merged.merge(lin_b);
+    merged.add_hop({.channel = *out_ch, .seq = ++out_seq});
+    if (dst_slot != nullptr) {
+      *dst_slot = std::move(merged);
+    }
     slot_a.reset();
     slot_b.reset();
     DataDispatcher::instance().dispatch(next, &out, sizeof(out));
@@ -203,16 +237,21 @@ class HandFanIn {
     auto& dispatcher = DataDispatcher::instance();
     const std::uint64_t j1_id = tianshu::core::channel_id_for(prefix + "/j1");
     const std::uint64_t out_id = tianshu::core::channel_id_for(prefix + "/out");
+    j1_out_ch_ = prefix + "/j1";
+    out_ch_ = prefix + "/out";
     dispatcher.add_buffer(tianshu::core::channel_id_for(prefix + "/a"), &j1_.in_a,
-                          [this, j1_id] { j1_.step_a(j1_id); }, owner_);
+                          [this, j1_id] { j1_.step_a(j1_id, &j2_.lin_a, &j1_out_ch_); }, owner_);
     dispatcher.add_buffer(tianshu::core::channel_id_for(prefix + "/b"), &j1_.in_b,
-                          [this, j1_id] { j1_.step_b(j1_id); }, owner_);
-    dispatcher.add_buffer(j1_id, &j2_.in_a, [this, out_id] { j2_.step_a(out_id); }, owner_);
+                          [this, j1_id] { j1_.step_b(j1_id, &j2_.lin_a, &j1_out_ch_); }, owner_);
+    dispatcher.add_buffer(j1_id, &j2_.in_a, [this, out_id] { j2_.step_a(out_id, nullptr, &out_ch_); },
+                          owner_);
     dispatcher.add_buffer(tianshu::core::channel_id_for(prefix + "/c"), &j2_.in_b,
-                          [this, out_id] { j2_.step_b(out_id); }, owner_);
+                          [this, out_id] { j2_.step_b(out_id, &sink_lin_, &out_ch_); }, owner_);
     dispatcher.add_buffer(out_id, &sink_buf_,
                           [this] {
                             while (const BenchMsg* msg = sink_buf_.try_fetch()) {
+                              const Lineage& received = sink_lin_;
+                              static_cast<void>(received);
                               sink_latencies_.push_back(now_ns() - msg->born_ns);
                             }
                           },
@@ -230,9 +269,13 @@ class HandFanIn {
     const std::uint64_t c = tianshu::core::channel_id_for(ch_c_);
     for (std::size_t i = 0; i < messages; ++i) {
       const std::uint64_t born = now_ns();
-      const BenchMsg ma{.born_ns = born, .seq = static_cast<std::uint64_t>(i)};
-      const BenchMsg mb{.born_ns = born, .seq = static_cast<std::uint64_t>(i)};
-      const BenchMsg mc{.born_ns = born, .seq = static_cast<std::uint64_t>(i)};
+      const auto seq = static_cast<std::uint64_t>(i);
+      const BenchMsg ma{.born_ns = born, .seq = seq};
+      const BenchMsg mb{.born_ns = born, .seq = seq};
+      const BenchMsg mc{.born_ns = born, .seq = seq};
+      j1_.lin_a = Lineage::rooted(ch_a_, seq);
+      j1_.lin_b = Lineage::rooted(ch_b_, seq);
+      j2_.lin_b = Lineage::rooted(ch_c_, seq);
       DataDispatcher::instance().dispatch(a, &ma, sizeof(ma));
       DataDispatcher::instance().dispatch(b, &mb, sizeof(mb));
       DataDispatcher::instance().dispatch(c, &mc, sizeof(mc));
@@ -243,9 +286,12 @@ class HandFanIn {
   std::string ch_a_;
   std::string ch_b_;
   std::string ch_c_;
+  std::string j1_out_ch_;
+  std::string out_ch_;
   HandJoin j1_;
   HandJoin j2_;
   CacheBuffer<BenchMsg> sink_buf_{16};
+  Lineage sink_lin_;
   std::vector<std::uint64_t>& sink_latencies_;
   const void* owner_;
 };
@@ -263,10 +309,15 @@ class HandFanOut {
       const std::uint64_t hop_id = tianshu::core::channel_id_for(hop);
       branches_[i].in = std::make_unique<CacheBuffer<BenchMsg>>(16);
       branches_[i].sink = std::make_unique<CacheBuffer<BenchMsg>>(16);
+      // Four consumers of one source channel: each branch gets its own
+      // lineage copy (the DSL fans a copy to every consumer).
       dispatcher.add_buffer(tianshu::core::channel_id_for(src), branches_[i].in.get(),
-                            [this, i, hop_id] {
+                            [this, i, hop_id, hop] {
                               while (const BenchMsg* msg = branches_[i].in->try_fetch()) {
                                 const BenchMsg out = transform(*msg);
+                                Lineage lin = branches_[i].src_lin;
+                                lin.add_hop({.channel = hop, .seq = ++branches_[i].out_seq});
+                                branches_[i].sink_lin = std::move(lin);
                                 DataDispatcher::instance().dispatch(hop_id, &out, sizeof(out));
                               }
                             },
@@ -274,6 +325,8 @@ class HandFanOut {
       dispatcher.add_buffer(hop_id, branches_[i].sink.get(),
                             [this, i] {
                               while (const BenchMsg* msg = branches_[i].sink->try_fetch()) {
+                                const Lineage& received = branches_[i].sink_lin;
+                                static_cast<void>(received);
                                 sink_latencies_.push_back(now_ns() - msg->born_ns);
                               }
                             },
@@ -287,7 +340,12 @@ class HandFanOut {
   void drive(std::size_t messages) {
     const std::uint64_t src = tianshu::core::channel_id_for(ch_src_);
     for (std::size_t i = 0; i < messages; ++i) {
-      const BenchMsg msg{.born_ns = now_ns(), .seq = static_cast<std::uint64_t>(i)};
+      const auto seq = static_cast<std::uint64_t>(i);
+      const BenchMsg msg{.born_ns = now_ns(), .seq = seq};
+      const Lineage root = Lineage::rooted(ch_src_, seq);
+      for (auto& branch : branches_) {
+        branch.src_lin = root;
+      }
       DataDispatcher::instance().dispatch(src, &msg, sizeof(msg));
     }
   }
@@ -296,6 +354,9 @@ class HandFanOut {
   struct Branch {
     std::unique_ptr<CacheBuffer<BenchMsg>> in;
     std::unique_ptr<CacheBuffer<BenchMsg>> sink;
+    Lineage src_lin;
+    Lineage sink_lin;
+    std::uint64_t out_seq{0};
   };
   std::array<Branch, 4> branches_;
   std::string ch_src_;
