@@ -3,7 +3,7 @@
 > **文档定位**：**as-built 系统参考**——描述"代码现在是什么样"，随每次迭代同步更新。
 > **与 ADR 的分工**：[ADR](../adr/README.md) 是**不可变的历史决策快照**（当时为什么这么定、否了什么）；本目录是**可变的现状描述**（现在长什么样、怎么用）。决策变了写新 ADR，现状变了改这里。
 > **维护契约**：见下方[维护契约](#维护契约每次迭代必须执行)——**改代码不更新本文档 = 迭代未完成**。
-> **最后同步**：2026-09-10
+> **最后同步**：2026-09-17
 
 ---
 
@@ -22,7 +22,7 @@
 | 调度器 | `tianshu/include/tianshu/sched/` | ✅ 已实现（回调式，无协程） | [modules/sched.md](./modules/sched.md) |
 | 运行时核心 | `tianshu/include/tianshu/core/` | ✅ 已实现 | [modules/core.md](./modules/core.md) |
 | 传输层 | `tianshu/include/tianshu/{transport,shm}/` | ✅ INTRA + SHM + kAuto；跨机 Zenoh 未实现 | [modules/transport.md](./modules/transport.md) |
-| 声明式 DSL 与血缘 | `tianshu/include/tianshu/dsl/` | ✅ DSL v0 + 血缘 + 切片 + 状态 + record v2 + fallback 阶梯 v0 | [modules/dsl.md](./modules/dsl.md) |
+| 声明式 DSL 与血缘 | `tianshu/include/tianshu/dsl/` | ✅ DSL v0 + 血缘 + 切片 + 状态 + record v2 + fallback 阶梯 v0 + M-C 特化安装（ADR-0032） | [modules/dsl.md](./modules/dsl.md) |
 | SLA 编译 | `tianshu/include/tianshu/sla/` | ✅ v0（加载期 deadline 验证） | [modules/sla.md](./modules/sla.md) |
 | L1 编译器 | `tianshu/include/tianshu/compiler/` | 🟡 部分实现（Phase 1 H2 主战场） | [modules/compiler.md](./modules/compiler.md) |
 | ti CLI 家族 | `tianshu/cli/` | ✅ ti / ti-launch / ti-monitor / ti-info | [modules/cli.md](./modules/cli.md) |

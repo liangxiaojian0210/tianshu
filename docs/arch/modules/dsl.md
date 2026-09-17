@@ -1,10 +1,10 @@
 # 声明式 DSL 与血缘（`tianshu/dsl`）
 
-> 状态：✅ 已实现（Phase 1：DSL v0 + 血缘 + 切片 + 状态 + record v2 + fallback 阶梯 v0）——写 flow 声明数据依赖与算子语义，`build()` 即完成 SLA 加载期验证，`FlowRuntime` 解释执行于 L4 栈上，逐消息血缘自动级联、逐消息可录可放。
+> 状态：✅ 已实现（Phase 1：DSL v0 + 血缘 + 切片 + 状态 + record v2 + fallback 阶梯 v0 + M-C 特化安装）——写 flow 声明数据依赖与算子语义，`build()` 即完成 SLA 加载期验证，`FlowRuntime` 解释执行于 L4 栈上，逐消息血缘自动级联、逐消息可录可放；`wire_specialized`（ADR-0032）按通道计划安装逐消息快路径，输出与解释执行逐字节一致。
 > 代码：`tianshu/include/tianshu/dsl/`（`flow.h` 声明层 · `dsl_runtime.h` 解释器 · `record.h` v0 遗留 · `record_v2.h` 流式记录）· `tianshu/src/{dsl_runtime,record,record_v2}.cc`
-> 关键 ADR：[ADR-0021 DSL v0](../../adr/0021-dsl-v0.md) · [ADR-0022 Lineage v0](../../adr/0022-lineage-v0.md) · [ADR-0024 op 原语](../../adr/0024-dsl-op-primitive.md) · [ADR-0025 from() 组件引用](../../adr/0025-from-component-reference.md) · [ADR-0026 切片输入模型](../../adr/0026-slice-input-model.md) · [ADR-0027 状态即数据](../../adr/0027-state-as-data-channel-taxonomy.md) · [ADR-0028 Record v2](../../adr/0028-record-format-v1.md) · [ADR-0031 降级阶梯](../../adr/0031-fallback-degradation.md)
-> 测试：`tests/dsl/`（6 文件：`dsl_test.cc` · `sla_test.cc` · `slice_state_test.cc` · `record_v2_test.cc` · `runtime_coverage_test.cc` · `flow_fallback_test.cc`）· 示例：`examples/{dsl_demo,lidar_imu_demo,full_chain_demo,record_replay_demo,state_recovery_demo,traceable_flow_demo}.cc` + 设备库 `examples/{avp_devices.cc,avp_types.h}`
-> 最后同步：2026-09-10 · commit `c8ed440`
+> 关键 ADR：[ADR-0021 DSL v0](../../adr/0021-dsl-v0.md) · [ADR-0022 Lineage v0](../../adr/0022-lineage-v0.md) · [ADR-0024 op 原语](../../adr/0024-dsl-op-primitive.md) · [ADR-0025 from() 组件引用](../../adr/0025-from-component-reference.md) · [ADR-0026 切片输入模型](../../adr/0026-slice-input-model.md) · [ADR-0027 状态即数据](../../adr/0027-state-as-data-channel-taxonomy.md) · [ADR-0028 Record v2](../../adr/0028-record-format-v1.md) · [ADR-0031 降级阶梯](../../adr/0031-fallback-degradation.md) · [ADR-0032 逐消息特化](../../adr/0032-per-message-specialization.md)
+> 测试：`tests/dsl/`（7 文件：`dsl_test.cc` · `sla_test.cc` · `slice_state_test.cc` · `record_v2_test.cc` · `runtime_coverage_test.cc` · `flow_fallback_test.cc` · `specialize_test.cc`）· 示例：`examples/{dsl_demo,lidar_imu_demo,full_chain_demo,record_replay_demo,state_recovery_demo,traceable_flow_demo}.cc` + 设备库 `examples/{avp_devices.cc,avp_types.h}`
+> 最后同步：2026-09-17 · M-C 特化安装落地（ADR-0032）
 
 ---
 
@@ -77,6 +77,8 @@
 |---|---|
 | `run_for(flow, duration)` | `wire(flow)` + `run_sources(flow, duration)`：装配 → 自举钩子 → 驱动全部 source 至时长耗尽 |
 | `wire(flow)` / `run_sources(flow, duration)` | 拆开的装配半程 / 运行半程——编译产物（ADR-0030）装自己的 wiring 后复用同一 run loop |
+| `wire_specialized(flow)` / `begin_specialize(flow)` | 特化安装（ADR-0032）：按通道计划（fast_fan / inbox / 历史条件化）安装 map/join/sink 快路径 + 其余通用安装；`begin_specialize` 供编译产物按声明序自行编排。H1 逐字节等价由 `specialize_test.cc` 锁定 |
+| `recording_active()` | 录制武装标志（特化扇出的逐跳回落检查；relaxed load，热路径一个可预测分支） |
 | `publish_bytes(channel, data, size, lineage)` | 血缘扇出到全部消费者队列 + 历史环捕获 + 同步 dispatch；rvalue 重载把血缘 move 进最后一个目的地（热路径省一次深拷贝） |
 | `history(channel)` | 通道有界历史（`(seq, bytes, lineage)` 最旧在前；从未发布返回 `nullptr`）——切片查询与状态恢复的在线基底 |
 | `sla_snapshot()` | 运行期 SLA 端点直方图与 miss 计数（未声明端点的流恒为空——零开销） |
@@ -190,6 +192,7 @@ flowchart LR
 - **在线/离线同 API**：在线基底 = 内存 `HistoryRing`（深度 64，`(seq, bytes, lineage)` 条目、payload 走 `SmallVec<uint8_t, 32>` 内联）；离线基底 = record 文件。`replay_from` 只重发**源通道**消息，中间通道经级联重算——sink 输出与血缘逐字节一致（demo 39/39 bit-identical）。
 - **record v2 写读路径**：append 攒批 → flush 时 chunk 内按 ts 排序 → 压缩（LZ4 默认 / ZSTD level 3 / None）→ 带 CRC 与 `ts_first/ts_last` 的 chunk 记录；`finish()` 依序写字典（含 schema blob 槽位）→ chunk 索引 → 统计 → 64B footer，再回填带 CRC 的 128B header（占位先写，保证数据从 offset 128 起）。live 录制经 `PublishCtx.recorded` 挂进 publish 热路径：通道首发自动 `add_channel`，消息 seq 取 `own_seq_of(lineage)`（首分支末跳或 root），录制器锁独立于运行时锁。
 - **发布热路径优化（ADR-0030 D8 落地）**：`PublishCtx` 把 channel_id / 队列表 / history 指针 / 录制通道一次性解析为写时复制快照（稳态一次原子 load + 一次哈希，无运行时锁）；`publish_derived` **按值收父血缘**——move 进来、`add_hop` 原位追加、末次 publish 再 move（否则每消息 O(hops²) 拷贝）；`Lineage` 分支 inline 容量 2、hops inline 容量 4（线性链与 join 拷贝零堆分配）。
+- **特化安装（ADR-0032）**：`SpecializeBuilder` 从 Flow 自身做生产者普查——fast_fan ⇔ 唯一 map/join 生产者且无 SLA 端点；fast stage 直连 `CacheBuffer` + 单函数指针擦除（无捕获 lambda）+ 自持单写者 seq 计数器 + 常量 id 扇出，跳过 `publish_derived` 的全局互斥与队列 deque 分配。血缘投递按写者纪律分类：唯一 source / fast map/join 生产者的通道用无锁 `LineageInbox`（定容环 + head/tail 原子，join 被单飞锁串行化保证单逻辑消费者），多生产者与 op/stateful/span/from 输出保持 mutex 队列。语义收窄两条（详见 ADR-0032 D3）：非 SLA flow 的历史捕获仅保留有图声明观察者的通道（span 数据 / stateful 状态）；录制武装时 fast 扇出逐跳回落通用 `publish_bytes`（record 文件逐字节一致，入口 `start/stop_recording` 现在清空 publish 上下文快照——修复既有漏采缺陷）。附带修复：`begin_specialize` 补上 SLA arming，compiled SLA flow 此前从不武装统计。
 - **fallback 阶梯判定与降级语义（ADR-0031，以代码为准）**：`build()` 时 `with_fallback` 目标名必须命中注册表（`detail::is_registered_flow`）且不许自引用，否则 throw；`IrGraph::fallback_flow()` 随 `export_conf()` 输出 `fallback_flow = "..."`（旧产物缺字段 = 无 fallback，向后兼容）。运行期：仅当声明了 fallback **且** SLA 端点已武装时起 watcher 线程，每 20ms 采样一次 miss 计数器，任一端点单窗口 miss 增量 ≥1 即计一次降级事件（`events`++，记 `last_endpoint` / `last_miss_count`）；无 fallback 声明的流零新增开销。**v0 只信号不接管**——热切换（停源、排空、按名重建 fallback 流）是 v1。
 - **from() 桥（ADR-0025 三问三答）**：输入驱动组件的 `proc` 在发布者 dispatch 线程内联执行（与 map/join 同模型）；定时组件自带线程。装配期 `launch(node, 输入通道, interval)` + `set_out_channel_override`（输出通道注入，一个驱动类服务多实例）；`init()` 推迟到 `init_hooks_` 阶段——全部消费者队列注册后才发布上电报文，反馈环自然点火。输出经 INTRA reader 泵回：**血缘边界 = "同步派生 vs 异步发布"**——`set_input_lineage_provider` 装的 mailbox 与组件 FIFO 消费逐条配对，`proc` 内 publish 携带父血缘经 `Message.lineage_ptr` 过桥派生（环跨组件边界展开）；init 期发布与无 provider 的组件仍 rooted。双输入形态（2026-09-10 修订）：每消费一对 `(msg0, msg1)` 从**两个队列各弹一条并 merge**——与 DSL join 同 provenance 规则。`run_sources` 返回前对全部引用组件 `quiesce()`（定时线程 join、在飞级联排空），teardown 不与运行中的回调竞争。
 
@@ -213,6 +216,7 @@ flowchart LR
 | 5 | **切片输入 = trigger + fetch**：map/join 是退化形态保留为语法糖；区间跳压缩多父（`imu#102..#121`，完整成员表按 (channel, seq-range) 可查）；在线/离线同 API 两个基底 | AllLatest 扩展（各取最新表达不了"一帧雷达要全部区间内 IMU"）；stage 一般化 API 面膨胀风险以"退化关系引导"缓解。Phase A/B/C 全部落地（C = record 基底，39/39 bit-identical） | [ADR-0026](../../adr/0026-slice-input-model.md) |
 | 6 | **状态即数据 + 通道分类学**：状态通道带版本带血缘；连续/快照两档诚实分层写放大；有名 = 契约边界（编译器不得动）、匿名 = 可优化边界（kernel fusion 法律基础）；恢复 = state#k + 后缀重放；算子是面 | 状态藏在算子内部变量（血缘不可见，只能全量重放——精确但昂贵）；`v0` 自动匿名通道由分类学获得设计正当性（不只是"用户没起名"，而是声明该接线不构成契约） | [ADR-0027](../../adr/0027-state-as-data-channel-taxonomy.md) |
 | 7 | **record v2**：血缘二进制入库（LineageRecord 引用字典 ID）、chunk 级 LZ4/ZSTD、分片/合并为文件级原生操作、schema blob 嵌入字典、双路径（回放选级联重建——快；分析选文件读取——不跑图） | v1 草案"不存血缘"被评审否决：离线审计需要不跑图读出血缘，文件里的血缘是权威记录；v0 单发 dump 被取代（无 live、无压缩、无索引）。与 MCAP/rosbag2 对比：血缘存储、POD schema、格式级保时序为本格式独有 | [ADR-0028](../../adr/0028-record-format-v1.md) |
+| 8b | **M-C 逐消息特化 = 类型化宿主钩子 + Flow 自推导通道计划**：map/join/sink 声明携带第二闭包 `specialize`（host 侧模板实例化，算子类型已知）；`.gen.cc` 只做常量编排。被否：`.gen.cc` 内联算子体（类型墙——IR 类型擦除、fn 藏于 wire 闭包）；join 单槽 inbox（配对前积累丢血缘）；全图无差别 inbox（op/stateful/span handle 可并发触发，破坏单写者） | [ADR-0032](../../adr/0032-per-message-specialization.md) |
 | 8 | **fallback 阶梯 v0 = 声明 + 加载期校验 + 运行期信号，不做热切换**；阈值 20ms 窗口 / miss 增量 ≥1 为编译期常量 | 热切换（v1）：正确性依赖"排空再重建"，lineage 连续性与状态恢复都要新协议，风险集中一次交付不可控；信号本身已闭环可用（ti monitor / 测试可驱动外部决策）。不做 fallback 链环检测：按名校验已排除未知名与自引用，跨流环到 v1 热切换才有运行期意义。阈值不提升为配置项：避免过早配置面 | [ADR-0031](../../adr/0031-fallback-degradation.md) |
 
 ## 6. 测试 / 示例入口
@@ -227,6 +231,7 @@ flowchart LR
 | `record_v2_test.cc` | CRC32 标准向量；lineage 序列化往返（含区间跳）；写读 round-trip（字典 / 统计 / ts 保序 / 血缘在场）；LZ4 压缩往返；split_by_time；merge（同通道归并 + 字典合并）；空文件 |
 | `runtime_coverage_test.cc` | live 录制生命周期（start/stop/double-stop）；stateful + span 经 `run_for` 全路径；未注册 from() 装配为 no-op 不崩不挂 |
 | `flow_fallback_test.cc` | 声明与携带（`fallback_flow()`）；默认无；未知名 / 自引用 build throw；运行期持续 miss 触发降级事件（events ≥ 1 + 最后违规端点）；健康流零事件；IR 往返（`IrGraph::fallback_flow()` + `.conf` 导出含 `fallback_flow = "..."`）；无声明不武装 watcher |
+| `specialize_test.cc` | H1 逐字节等价（ADR-0032）：五形状（1/4/9 跳线性、嵌套双 join 扇入、四分支扇出逐分支比对）+ 多生产者 map_to + 混合 op 段 + SLA 全通用回退 + 快路径确实启用（中间通道历史收窄）+ 录制内容一致（排除时间戳）+ 源通道回放等价 |
 
 **示例**（`examples/`）：
 
@@ -244,7 +249,7 @@ flowchart LR
 
 ## 7. 已知限制与演进方向
 
-- **解释器 ≠ 编译产物**：v0 只验证语义与 H1 链路，性能结论不外推；L1 codegen（[ADR-0030](../../adr/0030-l1-compiler.md)，H2 验证门 P99 < 1%）是当前主战场——`Flow` IR 与 `wire()`/`run_sources()` 拆分已为其备好接口。
+- **特化安装的语义收窄**（ADR-0032 D3，`wire_specialized` / 编译产物路径）：非 SLA flow 的 `history()` 在无图声明观察者的通道上返回空环（解释执行仍全量捕获）；并发契约 = 每通道同一时刻至多一个写者线程（v0 级联语义的明示化）。SLA flow 与 op/stateful/span/from 段保持通用安装。
 - **fallback 热切换（v1）**：停源、排空（quiesce 语义）、按名重建 fallback 流的 runtime；届时一并处理 fallback 链环检测（A→B→A）与阈值配置化。
 - **`FlowChain` 持 builder 裸指针**：链式表达式必须是单条完整语句（临时 builder 的生命期即链条）；跨语句拆链需用户保活 builder——v0 已记录的约束。
 - **血缘**：单分支 hops 随环迭代线性增长（超长运行需 Phase 2 深度上限截断，根保留）；跨进程（SHM 臂）`lineage_ptr` 丢弃，随行序列化是 Phase 2 演进。

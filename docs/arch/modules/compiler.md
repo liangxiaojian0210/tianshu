@@ -1,10 +1,10 @@
 # L1 编译器（`tianshu/compiler`）
 
-> 状态：🟡 部分实现（Phase 1 H2 主战场）。**已在代码**：IR 降维/拓扑/规范化/稳定哈希/`.dag`+`.conf` 导出（M-A 全量）、P1 结构校验、P4 源码 codegen（M-B 范围的 wire-replay 形态）、P5 系统编译器调用 + 缓存 + dlopen + degraded 回退（M-B 除 `ti compile` CLI 外全量）、H2 三方对比装置（五形状全）与 D8 运行时优化（L1/L1b/L2a/L2b/L2c）、M-D 的 `REGISTER_TRACEABLE_FLOW` 注册表与 dry-run。**未落地（仍在 ADR-0030 设计目标）**：P2 optimize pass（直通消除/常量传播）、逐消息 codegen 路径特化（D4 的 lambda 内联）、`ti compile` 离线编译 CLI、`ti launch` 启动重放接线
+> 状态：🟡 部分实现（Phase 1 H2 主战场，待判决）。**已在代码**：IR 降维/拓扑/规范化/稳定哈希/`.dag`+`.conf` 导出（M-A 全量）、P1 结构校验、P4 源码 codegen（M-C 特化编排形态，ADR-0032：`.gen.cc` 按 wire() 同序驱动 `begin_specialize`/`specialize`/`finalize`）、P5 系统编译器调用 + 缓存 + dlopen + degraded 回退（M-B 除 `ti compile` CLI 外全量）、**M-C 逐消息特化全量落地**（dsl 侧快路径 + 通道计划 + H1 逐字节等价 9 用例锁定，差距从 4-7.6× 收敛至脏机 1.3-2×）、H2 三方对比装置（五形状全，金标准已补齐 lineage 语义）与 D8 运行时优化（L1/L1b/L2a/L2b/L2c）、M-D 的 `REGISTER_TRACEABLE_FLOW` 注册表与 dry-run。**未落地**：P2 optimize pass（descope，见 ADR-0032 D6）、`ti compile` 离线编译 CLI、`ti launch` 启动重放接线、H2 正式判决（MC-4，空闲窗口按 §6.1 三轮取数，门槛已重校准为 max(1%, 2ns/跳)）
 > 代码：`tianshu/include/tianshu/compiler/{ir.h, pipeline.h, codegen.h}` · `tianshu/src/{ir.cc, pipeline.cc, codegen.cc}`
-> 关键 ADR：[ADR-0030 L1 编译器](../../adr/0030-l1-compiler.md)（六阶段管线 / M-A~M-D / 缓存键 = 规范化哈希 / D8 分层优化） · [ADR-0001 DSL 形式](../../adr/0001-dsl-form.md)（fluent builder + auto trace 路线） · [ADR-0031 降级阶梯](../../adr/0031-fallback-degradation.md)（`fallback_flow` 的 IR 携带与 conf 导出） · [ADR-0029 SLA 编译](../../adr/0029-sla-compilation.md)（P3 的内容）
+> 关键 ADR：[ADR-0030 L1 编译器](../../adr/0030-l1-compiler.md)（六阶段管线 / M-A~M-D / 缓存键 = 规范化哈希 / D8 分层优化） · [ADR-0032 逐消息特化](../../adr/0032-per-message-specialization.md)（D4 修正 / 通道计划 / H2 门槛重校准） · [ADR-0001 DSL 形式](../../adr/0001-dsl-form.md)（fluent builder + auto trace 路线） · [ADR-0031 降级阶梯](../../adr/0031-fallback-degradation.md)（`fallback_flow` 的 IR 携带与 conf 导出） · [ADR-0029 SLA 编译](../../adr/0029-sla-compilation.md)（P3 的内容）
 > 测试：`tests/compiler/{ir_test.cc, pipeline_test.cc, pipeline_validation_test.cc}` · 基准：`benchmarks/codegen_vs_handwritten.cc` · 示例：`examples/traceable_flow_demo.cc`
-> 最后同步：2026-09-16 · 扇入/扇出基准形状落地（随本批基准代码提交）
+> 最后同步：2026-09-17 · M-C 逐消息特化落地（ADR-0032）
 
 ## 1. 职责与边界（做什么 / 明确不做什么）
 
@@ -19,8 +19,7 @@
 
 **明确不做什么（as-built 边界，ADR 目标见 §7）**：
 
-- **不做 P2 优化 pass**：直通消除（恒等 map 折叠）与常量通道传播仍在 ADR-0030 D3 表内，代码无此阶段——融合/内联目前完全交给 C++ 编译器。
-- **不做逐消息路径特化**：M-B 产物复放解释执行的 wire 语义（`codegen.h` 头注释：Per-message path specialization is the M-C / H2 milestone）；D4 设想的"算子函数体 lambda 内联进 dispatch 回调"未落地。
+- **不做 P2 优化 pass**（descope，ADR-0032 D6）：直通消除需要 fn 语义可见性，类型擦除后不可判定；结构性改写对 H2 五形状零收益。
 - **不消费自己导出的 `.dag`/`.conf`**：两者是审计/溯源产物；当前唯一装载入口是进程内 `Pipeline::compile`（`ti-launch` 消费的是 core 侧 INI `DagConfig`，与本模块无关）。
 - **不做静态调度**：codegen 复刻 v0 级联语义，执行模型变更属 Phase 2（[ADR-0019](../../adr/0019-coroutine-strategy.md)）。
 
@@ -52,7 +51,7 @@
 
 | 函数 | 说明 |
 |---|---|
-| `generate_source(graph)` | 产出 `.gen.cc` 全文（期望输入已 normalize）。导出两个 C 符号：`tianshu_flow_hash()`（返回产物哈希）与 `tianshu_flow_install(FlowRuntime*, const Flow*)`（按规范拓扑序逐节点 `flow->maps()[i].wire(*rt);`——source 由 run loop 驱动不接线） |
+| `generate_source(graph)` | 产出 `.gen.cc` 全文（期望输入已 normalize）。导出两个 C 符号：`tianshu_flow_hash()`（返回产物哈希）与 `tianshu_flow_install(FlowRuntime*, const Flow*)`（M-C 形态，ADR-0032：`begin_specialize` → 按 wire() 同序逐节点 `specialize`（map/join/sink，缺钩子回退 `wire`）或 `wire`（op/stateful/span/from）→ `finalize` 冻结扇出绑定；拓扑以注释呈现，安装序 = 解释执行注册序） |
 
 ### 2.4 真实用法（摘自测试 / 示例）
 
@@ -117,7 +116,7 @@ flowchart LR
 | P1 validate+analyze | 图合法性（悬挂通道 / 类型一致 / 环检测）、拓扑排序 | 🟡 `Pipeline::validate` 只做**结构**校验（重复输出 / 悬空输入）；类型一致性与环**拒绝**未做——环（`map_to` 反馈）被 `compute_topo` 确定性尾排**接受**，类型信息在 IR 里只剩 `type_name` 字符串 |
 | P2 optimize | 直通消除 + 常量通道传播 | ❌ 未落地，管线中无此阶段 |
 | P3 sla-plan | ADR-0029 分析器，判定写 `.conf` | ✅ 分析在 `FlowBuilder::build()` 内执行（不在本管线内），`IrGraph` 携带其报告，`export_conf()` 落盘判定与预算表 |
-| P4 codegen | 自包含 `.gen.cc`；D4：算子 lambda 内联进 dispatch | 🟡 M-B 形态：拓扑常量化 + `wire()` 复放（`flow->maps()[i].wire(*rt)` 常量下标直线调用）；逐消息路径特化（lambda 内联 / 融合）= M-C 目标 |
+| P4 codegen | 自包含 `.gen.cc`；D4：算子 lambda 内联进 dispatch | ✅ M-C 形态（ADR-0032，D4 修正为类型化宿主钩子）：`specialize` 钩子（host 模板实例化）+ 常量编排安装；逐消息快路径在 dsl 侧 `FastMap/FastJoin/FastSinkStage`（直连 CacheBuffer、单指针擦除、自持 seq、常量扇出） |
 | P5 emit+load | 编译、缓存、dlopen、工厂绑定 | 🟡 全量落地（含哈希守卫与 degraded 回退），但 `ti compile` CLI（D7 的 M-B 交付物）未实现 |
 
 ### 3.2 compile → 装载 → 运行（`pipeline.cc`）
@@ -171,7 +170,7 @@ extern "C" void tianshu_flow_install(tianshu::dsl::FlowRuntime* rt,
 }
 ```
 
-`wire_accessor` 按 kind 映射到 Flow 的声明矢量（maps/joins/ops/statefuls/spans/froms/sinks；source 无条目——由 run loop 驱动）。**这是刻意保守的 M-B 策略**：产物与解释执行共用同一 wire 语义（H1 逐字节一致天然成立，`CompiledMatchesInterpreter` 锁定），把优化空间留给 D8 的运行时层与 M-C 的产物侧特化。
+`wire_accessor` 按 kind 映射到 Flow 的声明矢量（maps/joins/ops/statefuls/spans/froms/sinks；source 无条目——由 run loop 驱动）。M-B 的保守 wire 复放已被 M-C 特化编排取代（ADR-0032）：安装序刻意保持 wire() 的 per-kind 声明序（dispatcher 通知序与消费者扇出序与解释执行逐位相同），map/join/sink 走 `specialize` 钩子进 dsl 侧快路径，op/stateful/span/from 复放 `wire`。H1 逐字节一致由 `tests/dsl/specialize_test.cc`（9 用例）与 `CompiledMatchesInterpreter` 双重锁定；特化的机制细节（通道计划 / LineageInbox / 语义收窄）见 [modules/dsl.md](./dsl.md) §3 与 ADR-0032。
 
 ### 3.4 H2 三方对比装置（`benchmarks/codegen_vs_handwritten.cc`，D5/D8）
 
@@ -201,11 +200,13 @@ extern "C" void tianshu_flow_install(tianshu::dsl::FlowRuntime* rt,
 | 7 | **缓存键 = IR 规范化哈希（含运行时 ABI 串）** | 只哈希源声明：builder 调用序扰动导致无谓重编；不含版本串则库升级后旧 `.so` ABI 错配静默加载 | D1 + 风险节 |
 | 8 | DSL 形式 = **C++ fluent builder + auto trace** | 表达式模板（编译时间爆炸、错误信息灾难）；YAML 外部 DSL（类型检查弱、与 `.dag` 区分度低）——trace + codegen 路线承自 JAX / torch.compile | [ADR-0001](../../adr/0001-dsl-form.md) |
 | 9 | fallback 名随 IR / `.conf` 携带（空则省略，向后兼容） | 不进产物：声明图与产物不可溯源对应 | [ADR-0031](../../adr/0031-fallback-degradation.md) D1 |
+| 10 | **M-C 特化 = 类型化宿主钩子 + Flow 自推导计划**（D4 修正：类型墙使 `.gen.cc` 内联算子体不可行）；门槛重校准 max(1%, 2ns/跳) | 纯运行时 mode 开关（丢产物可审计性与缓存锚点）；DSL v1 表达式模板（ADR-0001 已否）；join 单槽 inbox（配对积累丢血缘） | [ADR-0032](../../adr/0032-per-message-specialization.md) |
 
 ## 6. 测试 / 基准 / 示例入口
 
 - `tests/compiler/ir_test.cc`（9 用例，M-A 验收）：降维 kinds+WCET · 拓扑生产者在前 · 哈希跨运行稳定 · **哈希对声明序不敏感**（双分支 join 两种声明序收敛）· `.dag` 导出含全通道与 hash · `.conf` 与 SlaReport 预算一致 · normalize 保节点数与匿名形状（幂等）· 全节点种类降维（source/map/op/stateful/span）· **from() 全 arity 降维**（2026-09-10）。
 - `tests/compiler/pipeline_test.cc`（4 用例，M-B 验收）：产物输出 = 解释执行输出 · 二次编译命中缓存 · 编译器缺失 degraded 但仍出全部输出 · 产物拒绝外来 flow（哈希守卫）。
+- `tests/dsl/specialize_test.cc`（9 用例，M-C H1 验收，ADR-0032）：五形状 / 多生产者 / 混合 op / SLA 回退 / 历史收窄 / 录制内容 / 回放——`wire_specialized` 与 `wire` 逐字节等价（值 + 血缘 describe 字节）。
 - `tests/compiler/pipeline_validation_test.cc`（5 用例，D6 降级路径）：悬空输入 / 重复生产者结构拒绝（经 `IrGraphTestPeer` 友元注入故障图——公共 IR 面刻意不可变）· 良形图通过 · strict 模式抛 `runtime_error` · `CompiledFlow` 移动语义全路径。
 - 基准：`benchmarks/codegen_vs_handwritten.cc`——5 链形 × 3 实现各 1M 条（fan-out 4M 样本），P50/P99/P99.9 counters；运行 `./build/desktop-release/bin/codegen_vs_handwritten --benchmark_min_time=1s`。**H2 判决数字必须按 §6.1 测量协议取**。
 - 示例：`examples/traceable_flow_demo.cc`（M-D：注册表枚举 → 按名 dry-run trace → SLA 报告 / artifact hash / fallback 阶梯打印 → 编译运行 → `fallback_state()`）。
@@ -214,9 +215,9 @@ extern "C" void tianshu_flow_install(tianshu::dsl::FlowRuntime* rt,
 
 开发宿主机为**异构 CPU**（AMD Ryzen AI 9 HX 370：逻辑 0-3 / 12-15 = Zen5 大核，5.16GHz + 16MB L3 簇；其余 16 线程 = Zen5c 小核，3.29GHz + 8MB L3 簇）。不绑核时调度器会把单线程 benchmark 挪到大核；**若显式绑到小核，全部数字无声放大 ~1.8×**（实测手写 short 50→90ns、long 331→561ns）——判决跑法必须绑大核。
 
-**有效环境判据**（空闲 + 大核 + performance governor；三轮 p50 应一字不差）：
+**有效环境判据**（空闲 + 大核 + performance governor；三轮 p50 应一字不差）。⚠️ 下表为**无血缘金标准**的历史基线（2026-09-16）；2026-09-17 起金标准补齐 lineage 语义（ADR-0032 D5，同语义基线），全部数字待空闲窗口三轮重定后替换：
 
-| 手写 | short | medium | long |
+| 手写（旧，无血缘） | short | medium | long |
 |---|---|---|---|
 | p50 | 50 ns | 180 ns | 331 ns |
 | p99 | 51 | 191 | 331 |
@@ -243,7 +244,7 @@ taskset -pc 3 $!                                            # 再绑核（顺序
 
 - **P2 optimize 未落地**：直通消除与常量传播还在 ADR-0030 D3 表里；当前优化全部依赖 `-O2` + D8 运行时层。落地时管线在 `validate` 与 SLA 报告携带之间插入改写阶段（需同步 `stable_hash` 语义：优化应幂等于规范化）。
 - **codegen 未做逐消息特化**（M-C 核心）：产物复放 wire 语义，per-message 路径仍是运行时通用路径；D4 的"算子 lambda 内联进 dispatch 回调 + SLA 预算 `static_assert` 级注释 + 直方图挂点"待 M-C 交付。
-- **H2 判决未正式裁定**：D8 分层优化已落地且 CI 矩阵护航（L1b 期间 CI 抓到反馈通道双写者堆破坏，本地/asan 不可见），但 <1% 的判决数字须按 §6.1 测量协议（大核盾 + 重定基线判据）取数后正式记录；五链形装置已齐备（2026-09-16 盾内验证：compiled ≈ interpreted 覆盖 join 与多消费者扇出，差距谱系 fanout 4.0× / medium 6.0× / fanin 6.7× / long 7.4× / short 7.6×，全部待 M-C 收口）。
+- **H2 判决未正式裁定**：M-C 特化已落地（H1 9 用例 + pipeline 双重锁定；脏机量级 compiled/gold 从 4-7.6× 收敛至 1.3-2×，正式数字须空闲大核盾按 §6.1 三轮取数（MC-4，由用户执行）；锁/原子路径在负载下不成比例劣化，agent 工作期间的数字一律不作数。
 - **P1 分析面窄**：无类型一致性检查（IR 层类型已擦除为字符串）、环不被拒绝只被确定性排序——完整 analyze 语义待 M-C。
 - **`ti compile` CLI 缺位**：离线预编译（车端冷启动秒级首编译的主要缓解）只能经进程内 `Pipeline::compile` + 缓存目录复用间接达成。
 - **`.dag`/`.conf` 无消费方**：装载路径不读它们（守卫靠运行期重算哈希）；`ti launch` 接 dry-run 重放（M-D 收尾）后它们才成为装载输入。

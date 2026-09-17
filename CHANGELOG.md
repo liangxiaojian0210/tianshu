@@ -6,6 +6,51 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Per-message path specialization — M-C (ADR-0032)
+
+- `FlowRuntime::wire_specialized(flow)` / `begin_specialize(flow)`: install
+  per-message fast stages for closed single-producer map/join channels
+  (plan derived from the Flow itself — no IR drift); op/stateful/span/from
+  segments and multi-producer channels keep the generic wiring, mixed
+  graphs compose through the shared consumer registry
+- map/join/sink declarations now carry a typed `specialize` hook
+  (host-side template instantiation next to `wire`); the generated
+  `.gen.cc` installs via `begin_specialize` → per-kind declaration-order
+  `specialize`/`wire` calls → `finalize` (registration order identical to
+  `wire()`)
+- fast stages: direct CacheBuffer registration (no DataVisitor wrapper on
+  single-input stages), raw function-pointer erasure for captureless
+  operators, per-channel single-writer seq counters, constant-id fan-out;
+  `LineageInbox` (fixed ring, atomic head/tail) replaces the locked
+  deque queue on single-writer channels
+- H1 byte-equality locked by `tests/dsl/specialize_test.cc` (9 cases):
+  five roadmap shapes, multi-producer map_to, mixed op segments, SLA
+  generic fallback, history-narrowing contract, record content, replay
+- semantic narrowing on specialized runs (documented in ADR-0032 D3):
+  history capture only on channels with graph-declared observers
+  (span data / stateful state); while recording is armed, fast fan-out
+  falls back to the generic publish path so record files stay
+  byte-identical
+- fixed: `start_recording`/`stop_recording` now invalidate resolved
+  publish contexts — recording armed after the first publish previously
+  skipped capture silently on already-resolved channels; fixed: compiled
+  SLA flows never armed their histogram collectors (arming now lives in
+  `begin_specialize` too); fixed: `~FlowRuntime` now deregisters every
+  stage from the process-wide DataDispatcher — two sequentially
+  destroyed runtimes with identical flow names previously left dangling
+  sinks that crashed the second runtime's first publish
+- `resolve_publish_ctx` gains a thread-local pointer-identity cache
+  (owner + content-snapshot + epoch validation)
+- H2 gate recalibrated (ADR-0032 D5, option 1): p99 delta <= max(1%,
+  2ns/hop absolute allowance); the handwritten gold standard in
+  `benchmarks/codegen_vs_handwritten.cc` now carries the same lineage
+  semantics as the DSL (root, per-hop add_hop with per-channel seq,
+  join merge, per-consumer fan) — old lineage-free baselines are
+  obsolete, re-baselining happens with the formal verdict (idle-window,
+  shielded, three runs)
+- version bumped to 0.1.1 (artifact cache key invalidation: generated
+  install ABI changed)
+
 Phase 1 PoC — in progress.
 
 ### H2 rig: fan-in / fan-out benchmark shapes (roadmap 1.3)
