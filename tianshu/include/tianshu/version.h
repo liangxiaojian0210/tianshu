@@ -22,8 +22,8 @@
 // NOLINTBEGIN(modernize-macro-to-enum): must be macros for C preprocessor.
 #define TIANSHU_VERSION_MAJOR 0
 #define TIANSHU_VERSION_MINOR 1
-#define TIANSHU_VERSION_PATCH 0
-#define TIANSHU_VERSION_STRING "0.1.0"
+#define TIANSHU_VERSION_PATCH 1
+#define TIANSHU_VERSION_STRING "0.1.1"
 // NOLINTEND(modernize-macro-to-enum)
 
 // Compile-time profile (set via build system, per ADR-0005).
