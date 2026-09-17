@@ -43,12 +43,13 @@
 | [0029](./0029-sla-compilation.md) | SLA 编译 v0：加载期 deadline 验证与预算分配 | dsl | ✅ | 类型化 Sla+WCET 声明、链路确定性预算+饱和度准入两层分析、预算下行分摊、fail-fast |
 | [0030](./0030-l1-compiler.md) | L1 编译器：六阶段管线与零开销 codegen | dsl | ✅ | 声明图即 IR、源码 codegen+系统编译器成 .so、缓存键=规范化哈希、H2 三方对比装置、M-A~M-D 里程碑 |
 | [0031](./0031-fallback-degradation.md) | 降级阶梯：with_fallback 声明与运行期降级信号 | dsl | ✅ | 加载期校验 fallback 名、IR/.conf 携带、20ms 窗口 miss 检测、fallback_state() 信号（v0 不热切换） |
+| [0032](./0032-per-message-specialization.md) | M-C 逐消息特化：类型化宿主钩子与 H2 门槛重校准 | dsl | ✅ | D4 类型墙修正、Flow 自推导通道计划、LineageInbox、历史捕获收窄、录制回落、门槛 max(1%, 2ns/跳) |
 
 ## 域视图
 
 - **build**：0003 · 0004 · 0018
 - **infra**：0002 · 0005 · 0007 · 0009 · 0011 · 0012 · 0016 · 0017
 - **runtime**（transport/message/sched/lineage）：0008 · 0010 · 0013 · 0015 · 0019 · 0022 · 0023
-- **dsl/compiler**：0001 · 0021 · 0024 · 0025 · 0026 · 0027 · 0028 · 0029 · 0030 · 0031
+- **dsl/compiler**：0001 · 0021 · 0024 · 0025 · 0026 · 0027 · 0028 · 0029 · 0030 · 0031 · 0032
 - **gpu**：0006
 - **tooling**（ti 家族/console/monitor）：0014 · 0020
