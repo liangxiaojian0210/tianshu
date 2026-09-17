@@ -53,6 +53,34 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 Phase 1 PoC — in progress.
 
+### Typed source entry (ADR-0033)
+
+- `dsl::SourceEntry`: a direct publish for one flow-declared source
+  channel. `FlowRuntime::bind_source_entry(flow, channel)` freezes the
+  channel's install-time constants (id, history pointer, consumer
+  slots — the same resolution finalize() applies to fast-stage
+  fan-outs); each publish is a straight line that skips the generic
+  entry segment (context hash + snapshot cache, per-channel push lock,
+  SLA probe). Recorder-armed runs fall back to publish_bytes so record
+  files stay byte-identical; history follows the ADR-0032 narrowing.
+  Eligibility: no SLA endpoints, exactly one producer of kind source.
+  H1 locked by tests/dsl/source_entry_test.cc (linear / fan-in /
+  SLA-fallback / observer-history via span output).
+- H2 rig: compiled drivers enter through SourceEntry (driver-role
+  mirror of the handwritten rig's direct dispatch); gate diff under
+  protocol v2 shrinks to 20/110/131/170/80 ns across the five shapes.
+
+### H2 verdict protocol v2: thread-state warmer
+
+- The H2 rig warms the thread state at startup (one thread created and
+  joined), permanently clearing glibc's __libc_single_threaded so every
+  benchmark — gold, interpreted, compiled — runs in the
+  production-representative state (atomic mutex path, atomic shared_ptr
+  refcounts). The verdict no longer depends on benchmark registration
+  order; gold baseline re-taken under the unified state (short 110 ns,
+  others unchanged from R1 — they already ran post-flip). Evidence in
+  r2-rounds/.
+
 ### Install-only runs no longer spawn driver threads
 
 - `FlowRuntime::run_sources(flow, duration)` with `duration <= 0`

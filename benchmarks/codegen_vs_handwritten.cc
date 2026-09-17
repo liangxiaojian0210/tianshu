@@ -43,6 +43,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <benchmark/benchmark.h>
@@ -62,6 +63,19 @@ using tianshu::base::CacheBuffer;
 using tianshu::compiler::Pipeline;
 using tianshu::core::DataDispatcher;
 using tianshu::core::Lineage;
+using tianshu::dsl::SourceEntry;
+
+// Thread-state warmer (compiler.md §6.1 protocol v2): one pthread_create
+// here permanently clears glibc's __libc_single_threaded, putting every
+// std::mutex and shared_ptr refcount in this process on the atomic path —
+// the state a production host (source threads, watchers) always runs in.
+// Warming up front makes the state uniform across all benchmarks, so the
+// verdict no longer depends on benchmark registration order.
+const bool kThreadStateWarmed = [] {
+  std::thread warmer([] {});
+  warmer.join();
+  return true;
+}();
 
 struct BenchMsg {
   std::uint64_t born_ns{0};
@@ -443,6 +457,26 @@ void publish_fanin(tianshu::dsl::FlowRuntime& rt, const tianshu::dsl::Flow& flow
   }
 }
 
+// Publish-only drive via typed source entries (ADR-0033): the compiled
+// artifact installs its own wiring via run(), and the drive loop enters
+// through the artifact-era entry (constant fan-out, no generic publish
+// segment) — the driver-role mirror of the handwritten rig's direct
+// dispatch calls.
+void publish_entries_fanin(tianshu::dsl::FlowRuntime& rt, const tianshu::dsl::Flow& flow,
+                           int messages) {
+  const auto& sources = flow.sources();
+  SourceEntry entry_a(rt, flow, sources[0].channel);
+  SourceEntry entry_b(rt, flow, sources[1].channel);
+  SourceEntry entry_c(rt, flow, sources[2].channel);
+  for (int i = 0; i < messages; ++i) {
+    const std::uint64_t born = now_ns();
+    const auto seq = static_cast<std::uint64_t>(i);
+    entry_a.publish(BenchMsg{.born_ns = born, .seq = seq}, seq);
+    entry_b.publish(BenchMsg{.born_ns = born, .seq = seq}, seq);
+    entry_c.publish(BenchMsg{.born_ns = born, .seq = seq}, seq);
+  }
+}
+
 void drive_fanin(tianshu::dsl::FlowRuntime& rt, const tianshu::dsl::Flow& flow, int messages) {
   rt.wire(flow);
   publish_fanin(rt, flow, messages);
@@ -487,11 +521,10 @@ void run_compiled(benchmark::State& state, int hops) {
     // 0ms: install the artifact's wiring without driving the timer
     // source (its emit stamps born_ns=0, which would poison percentiles).
     compiled.run(rt, flow, std::chrono::milliseconds(0));
-    const std::string& channel = flow.sources().front().channel;
+    SourceEntry entry(rt, flow, flow.sources().front().channel);
     for (int i = 0; i < kMessages; ++i) {
-      const BenchMsg msg{.born_ns = now_ns(), .seq = static_cast<std::uint64_t>(i)};
-      rt.publish_bytes(channel, &msg, sizeof(msg),
-                      Lineage::rooted(channel, static_cast<std::uint64_t>(i)));
+      entry.publish(BenchMsg{.born_ns = now_ns(), .seq = static_cast<std::uint64_t>(i)},
+                    static_cast<std::uint64_t>(i));
     }
     report_percentiles(state, latencies, hops);
   }
@@ -528,7 +561,7 @@ void run_compiled_fanin(benchmark::State& state) {
     auto compiled = tianshu::compiler::Pipeline::compile(flow, opts);
     tianshu::dsl::FlowRuntime rt;
     compiled.run(rt, flow, std::chrono::milliseconds(0));
-    publish_fanin(rt, flow, kMessages);
+    publish_entries_fanin(rt, flow, kMessages);
     report_percentiles(state, latencies, 2);
   }
 }
@@ -564,11 +597,10 @@ void run_compiled_fanout(benchmark::State& state) {
     auto compiled = tianshu::compiler::Pipeline::compile(flow, opts);
     tianshu::dsl::FlowRuntime rt;
     compiled.run(rt, flow, std::chrono::milliseconds(0));
-    const std::string& channel = flow.sources().front().channel;
+    SourceEntry entry(rt, flow, flow.sources().front().channel);
     for (int i = 0; i < kMessages; ++i) {
-      const BenchMsg msg{.born_ns = now_ns(), .seq = static_cast<std::uint64_t>(i)};
-      rt.publish_bytes(channel, &msg, sizeof(msg),
-                       Lineage::rooted(channel, static_cast<std::uint64_t>(i)));
+      entry.publish(BenchMsg{.born_ns = now_ns(), .seq = static_cast<std::uint64_t>(i)},
+                    static_cast<std::uint64_t>(i));
     }
     report_percentiles(state, latencies, 1);
   }
