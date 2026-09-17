@@ -580,6 +580,19 @@ class FlowRuntime {
   // the per-channel plan from the flow and constructs the stages.
   SpecializeBuilder begin_specialize(const Flow& flow);
 
+  // Install-time binding for a typed source entry (ADR-0033): the
+  // channel's frozen constants — the same resolution finalize() applies
+  // to fast-stage fan-outs. Eligible when the specialized plan applies
+  // (no SLA endpoints, exactly one producer of kind source); history
+  // follows the ADR-0032 narrowing (only graph-declared observers).
+  struct SourceEntryBinding {
+    core::ChannelId id{0};
+    detail::HistoryRing* history{nullptr};
+    std::vector<detail::LineageChannel*> slots;
+    bool eligible{false};
+  };
+  [[nodiscard]] SourceEntryBinding bind_source_entry(const Flow& flow, const std::string& channel);
+
   // Run half: fires bootstrap hooks (ADR-0024), drives sources for
   // `duration`, quiesces referenced timer components. Call after some
   // form of wiring (wire() / wire_specialized() / a compiled install).
@@ -1085,6 +1098,38 @@ class SpecializeBuilder {
   std::unordered_map<std::string, std::string> producer_kind_;
   std::unordered_set<std::string> history_observers_;
   std::vector<detail::FastStageBase*> fast_stages_;
+};
+
+// Typed source entry (ADR-0033): a direct publish for one flow-declared
+// source channel. Construction freezes the channel's install-time
+// constants; each publish is a straight line — recorder-armed fallback
+// to the generic publish (record files stay byte-identical), narrowed
+// history capture, constant fan-out, constant-id dispatch — skipping
+// the generic entry segment (context hash + snapshot cache, per-channel
+// push lock, SLA probe). The message type is erased to bytes at the
+// call site, so artifacts never need type knowledge. Bindings live
+// until the next wiring round, same as fast-stage fan-outs.
+class SourceEntry {
+ public:
+  SourceEntry(FlowRuntime& rt, const Flow& flow, std::string channel);
+
+  SourceEntry(const SourceEntry&) = delete;
+  SourceEntry& operator=(const SourceEntry&) = delete;
+
+  template <typename T>
+  void publish(const T& msg, std::uint64_t seq) {
+    publish_bytes(&msg, sizeof(T), core::Lineage::rooted(channel_, seq));
+  }
+
+  void publish_bytes(const void* data, std::size_t size, core::Lineage lineage);
+
+ private:
+  FlowRuntime& rt_;
+  std::string channel_;
+  core::ChannelId id_{0};
+  detail::HistoryRing* history_{nullptr};
+  std::vector<detail::LineageChannel*> slots_;
+  bool specialized_{false};
 };
 
 namespace detail {

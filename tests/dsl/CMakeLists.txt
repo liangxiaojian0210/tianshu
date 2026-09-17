@@ -25,3 +25,7 @@ gtest_discover_tests(flow_fallback_test)
 add_executable(specialize_test specialize_test.cc)
 target_link_libraries(specialize_test PRIVATE tianshu GTest::gtest_main)
 gtest_discover_tests(specialize_test)
+
+add_executable(source_entry_test source_entry_test.cc)
+target_link_libraries(source_entry_test PRIVATE tianshu GTest::gtest_main)
+gtest_discover_tests(source_entry_test)

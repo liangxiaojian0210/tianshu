@@ -55,6 +55,42 @@ std::uint64_t own_seq_of(const core::Lineage& lin) {
   return branch.hops.empty() ? branch.root.seq : branch.hops.back().seq;
 }
 
+// ADR-0033 entry eligibility, mirroring the SpecializeBuilder plan
+// predicates: exactly one producer of kind source (the declaration is
+// the single-writer guarantee) and no producer of any other kind.
+bool source_channel_single_producer(const Flow& flow, const std::string& channel) {
+  const auto produced_here = [&channel](const std::string& out) {
+    return out == channel;
+  };
+  std::size_t source_producers = 0;
+  bool other_producer = false;
+  for (const auto& source : flow.sources()) {
+    if (produced_here(source.channel)) {
+      ++source_producers;
+    }
+  }
+  for (const auto& map_decl : flow.maps()) {
+    other_producer = other_producer || produced_here(map_decl.out_channel);
+  }
+  for (const auto& join_decl : flow.joins()) {
+    other_producer = other_producer || produced_here(join_decl.out_channel);
+  }
+  for (const auto& op_decl : flow.ops()) {
+    other_producer = other_producer || produced_here(op_decl.out_channel);
+  }
+  for (const auto& st_decl : flow.statefuls()) {
+    other_producer = other_producer || produced_here(st_decl.out_channel) ||
+                     produced_here(st_decl.state_channel);
+  }
+  for (const auto& span_decl : flow.spans()) {
+    other_producer = other_producer || produced_here(span_decl.out_channel);
+  }
+  for (const auto& from_decl : flow.froms()) {
+    other_producer = other_producer || produced_here(from_decl.out_channel);
+  }
+  return source_producers == 1 && !other_producer;
+}
+
 }  // namespace
 void FlowRuntime::publish_bytes(const std::string& channel, const void* data, std::size_t size,
                                 const core::Lineage& lineage) {
@@ -676,6 +712,60 @@ void FlowRuntime::run_sources(const Flow& flow, std::chrono::milliseconds durati
       comp->quiesce();
     }
   }
+}
+
+FlowRuntime::SourceEntryBinding FlowRuntime::bind_source_entry(const Flow& flow,
+                                                               const std::string& channel) {
+  SourceEntryBinding binding;
+  if (!flow.sla_endpoints().empty() || !source_channel_single_producer(flow, channel)) {
+    return binding;
+  }
+  const PublishCtx& ctx = resolve_publish_ctx(channel);
+  binding.eligible = true;
+  binding.id = ctx.id;
+  const auto found = channel_queues_.find(channel);
+  if (found != channel_queues_.end()) {
+    binding.slots = found->second;
+  }
+  for (const auto& span_decl : flow.spans()) {
+    if (span_decl.data_channel == channel) {
+      binding.history = ctx.history;
+      return binding;
+    }
+  }
+  for (const auto& st_decl : flow.statefuls()) {
+    if (st_decl.state_channel == channel) {
+      binding.history = ctx.history;
+      return binding;
+    }
+  }
+  return binding;
+}
+
+SourceEntry::SourceEntry(FlowRuntime& rt, const Flow& flow, std::string channel)
+    : rt_(rt), channel_(std::move(channel)) {
+  auto binding = rt_.bind_source_entry(flow, channel_);
+  specialized_ = binding.eligible;
+  id_ = binding.id;
+  history_ = binding.history;
+  slots_ = std::move(binding.slots);
+}
+
+void SourceEntry::publish_bytes(const void* data, std::size_t size, core::Lineage lineage) {
+  if (!specialized_ || rt_.recording_active()) {
+    rt_.publish_bytes(channel_, data, size, std::move(lineage));
+    return;
+  }
+  if (history_ != nullptr) {
+    history_->push(own_seq_of(lineage), data, size, lineage);
+  }
+  for (std::size_t i = 0; i + 1 < slots_.size(); ++i) {
+    slots_[i]->push(lineage);
+  }
+  if (!slots_.empty()) {
+    slots_.back()->push(std::move(lineage));
+  }
+  core::DataDispatcher::instance().dispatch(id_, data, size);
 }
 
 }  // namespace tianshu::dsl

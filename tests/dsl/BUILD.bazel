@@ -62,3 +62,23 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "source_entry_test",
+    size = "small",
+    srcs = ["source_entry_test.cc"],
+    deps = [
+        "//tianshu",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "specialize_test",
+    size = "small",
+    srcs = ["specialize_test.cc"],
+    deps = [
+        "//tianshu",
+        "@googletest//:gtest_main",
+    ],
+)

@@ -78,6 +78,7 @@
 | `run_for(flow, duration)` | `wire(flow)` + `run_sources(flow, duration)`：装配 → 自举钩子 → 驱动全部 source 至时长耗尽 |
 | `wire(flow)` / `run_sources(flow, duration)` | 拆开的装配半程 / 运行半程——编译产物（ADR-0030）装自己的 wiring 后复用同一 run loop。`duration <= 0` 为 install-only：自举钩子照跑，但**不创建任何驱动线程**（创建过线程会永久撤销 glibc/libstdc++ 的单线程快路径，见 CHANGELOG 2026-09-17 fix） |
 | `wire_specialized(flow)` / `begin_specialize(flow)` | 特化安装（ADR-0032）：按通道计划（fast_fan / inbox / 历史条件化）安装 map/join/sink 快路径 + 其余通用安装；`begin_specialize` 供编译产物按声明序自行编排。H1 逐字节等价由 `specialize_test.cc` 锁定 |
+| `SourceEntry(rt, flow, channel)` / `rt.bind_source_entry(flow, channel)` | 类型化源入口（ADR-0033）：安装期冻结通道常量（id / 历史 / 消费者槽，与 `finalize()` 冻结 FanBinding 同构），发布为直线——录制武装回落 `publish_bytes`（record 字节一致）、历史按 ADR-0032 收窄、常量扇出 + 常量 id 分发，跳过通用入口段（上下文哈希/快照缓存、每通道 push 锁、SLA 探测）。资格 = 无 SLA 端点且通道恰有一个 source 生产者；等价性由 `source_entry_test.cc` 锁定 |
 | `recording_active()` | 录制武装标志（特化扇出的逐跳回落检查；relaxed load，热路径一个可预测分支） |
 | `publish_bytes(channel, data, size, lineage)` | 血缘扇出到全部消费者队列 + 历史环捕获 + 同步 dispatch；rvalue 重载把血缘 move 进最后一个目的地（热路径省一次深拷贝） |
 | `history(channel)` | 通道有界历史（`(seq, bytes, lineage)` 最旧在前；从未发布返回 `nullptr`）——切片查询与状态恢复的在线基底 |
