@@ -611,10 +611,19 @@ void FlowRuntime::run_sources(const Flow& flow, std::chrono::milliseconds durati
   }
 
   const auto start = std::chrono::steady_clock::now();
+  // Install-only runs (duration <= 0) drive nothing: skip thread creation
+  // entirely. pthread_create permanently clears glibc's
+  // __libc_single_threaded, flipping every std::mutex in the host process
+  // onto the atomic path — a measurable per-hop cost for single-threaded
+  // hosts. drive_source at duration <= 0 emits nothing, so skipping the
+  // threads changes no observable publishing behavior.
+  const bool install_only = duration.count() <= 0;
   std::vector<std::thread> source_threads;
-  source_threads.reserve(flow.sources().size());
-  for (const auto& source : flow.sources()) {
-    source_threads.emplace_back(drive_source, std::cref(source), duration, start, this);
+  if (!install_only) {
+    source_threads.reserve(flow.sources().size());
+    for (const auto& source : flow.sources()) {
+      source_threads.emplace_back(drive_source, std::cref(source), duration, start, this);
+    }
   }
 
   // Degradation watcher (ADR-0031 v0): while a fallback is declared and
@@ -630,22 +639,24 @@ void FlowRuntime::run_sources(const Flow& flow, std::chrono::milliseconds durati
       const std::scoped_lock lock(fallback_mutex_);
       fallback_.declared = flow.fallback_flow();
     }
-    fallback_thread = std::thread([this, duration, start, &last_misses, kWindow] {
-      for (auto now = std::chrono::steady_clock::now(); now - start < duration;
-           now = std::chrono::steady_clock::now()) {
-        std::this_thread::sleep_until(now + kWindow);
-        for (const auto& ep : sla_stats_->snapshot()) {
-          const std::uint64_t delta = ep.miss_count - last_misses[ep.endpoint];
-          last_misses[ep.endpoint] = ep.miss_count;
-          if (delta >= kWindowMisses) {
-            const std::scoped_lock lock(fallback_mutex_);
-            ++fallback_.events;
-            fallback_.last_endpoint = ep.endpoint;
-            fallback_.last_miss_count = ep.miss_count;
+    if (!install_only) {
+      fallback_thread = std::thread([this, duration, start, &last_misses, kWindow] {
+        for (auto now = std::chrono::steady_clock::now(); now - start < duration;
+             now = std::chrono::steady_clock::now()) {
+          std::this_thread::sleep_until(now + kWindow);
+          for (const auto& ep : sla_stats_->snapshot()) {
+            const std::uint64_t delta = ep.miss_count - last_misses[ep.endpoint];
+            last_misses[ep.endpoint] = ep.miss_count;
+            if (delta >= kWindowMisses) {
+              const std::scoped_lock lock(fallback_mutex_);
+              ++fallback_.events;
+              fallback_.last_endpoint = ep.endpoint;
+              fallback_.last_miss_count = ep.miss_count;
+            }
           }
         }
-      }
-    });
+      });
+    }
   }
 
   for (auto& thread : source_threads) {

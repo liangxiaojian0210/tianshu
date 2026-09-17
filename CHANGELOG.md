@@ -53,6 +53,22 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 Phase 1 PoC — in progress.
 
+### Install-only runs no longer spawn driver threads
+
+- `FlowRuntime::run_sources(flow, duration)` with `duration <= 0`
+  (install-only, the mode compiled artifacts use via
+  `Pipeline::run(rt, flow, 0ms)`) no longer creates per-source threads
+  or the fallback watcher thread; init hooks and `fallback_.declared`
+  side effects are unchanged. Rationale: one `pthread_create`
+  permanently clears glibc's `__libc_single_threaded`, which flips
+  every `std::mutex` (and libstdc++ shared_ptr refcounts, via
+  `__atomic_*_dispatch`) in the host process onto the atomic path —
+  ~6 ns per lock pair, a measurable per-hop cost for single-threaded
+  hosts. Measured on the H2 rig (shielded, three rounds): compiled
+  p50 dropped 191→160 / 441→370 / 822→711 / 802→651 / 480→390 ns
+  across the five shapes; verdict-relevant evidence in
+  r1-rounds/attr/.
+
 ### H2 rig: fan-in / fan-out benchmark shapes (roadmap 1.3)
 
 - benchmarks/codegen_vs_handwritten.cc: two new shapes round out the

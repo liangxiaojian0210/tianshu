@@ -76,7 +76,7 @@
 | 方法 | 说明 |
 |---|---|
 | `run_for(flow, duration)` | `wire(flow)` + `run_sources(flow, duration)`：装配 → 自举钩子 → 驱动全部 source 至时长耗尽 |
-| `wire(flow)` / `run_sources(flow, duration)` | 拆开的装配半程 / 运行半程——编译产物（ADR-0030）装自己的 wiring 后复用同一 run loop |
+| `wire(flow)` / `run_sources(flow, duration)` | 拆开的装配半程 / 运行半程——编译产物（ADR-0030）装自己的 wiring 后复用同一 run loop。`duration <= 0` 为 install-only：自举钩子照跑，但**不创建任何驱动线程**（创建过线程会永久撤销 glibc/libstdc++ 的单线程快路径，见 CHANGELOG 2026-09-17 fix） |
 | `wire_specialized(flow)` / `begin_specialize(flow)` | 特化安装（ADR-0032）：按通道计划（fast_fan / inbox / 历史条件化）安装 map/join/sink 快路径 + 其余通用安装；`begin_specialize` 供编译产物按声明序自行编排。H1 逐字节等价由 `specialize_test.cc` 锁定 |
 | `recording_active()` | 录制武装标志（特化扇出的逐跳回落检查；relaxed load，热路径一个可预测分支） |
 | `publish_bytes(channel, data, size, lineage)` | 血缘扇出到全部消费者队列 + 历史环捕获 + 同步 dispatch；rvalue 重载把血缘 move 进最后一个目的地（热路径省一次深拷贝） |
