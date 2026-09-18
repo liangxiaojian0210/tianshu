@@ -14,6 +14,7 @@ target_link_libraries(hello_test PRIVATE tianshu GTest::gtest_main)
 gtest_discover_tests(hello_test)
 
 add_subdirectory(base)
+add_subdirectory(cli)
 add_subdirectory(compiler)
 add_subdirectory(core)
 add_subdirectory(dsl)
