@@ -292,6 +292,13 @@ class DirectSlot final : public LineageChannel {
   void push(core::Lineage&& lineage) override { value_ = std::move(lineage); }
   core::Lineage pop() override { return std::move(value_); }
 
+  // In-place access for same-stack linear consumers (the ADR-0036
+  // single-writer discipline): the consumer mutates and reads the slot
+  // storage directly — no by-value pop, so the embedded strings are
+  // never reconstructed on the hop path. The producer overwrites the
+  // value on its next push.
+  [[nodiscard]] core::Lineage& value() { return value_; }
+
  private:
   core::Lineage value_;
 };
@@ -822,9 +829,13 @@ class FastMapStage final : public StageHolder, public FastStageBase {
         core::channel_id_for(in_channel), buffer_.get(),
         [this] {
           while (TIn* msg = buffer_->try_fetch()) {
-            core::Lineage parent = slot_.pop();
             TOut out = fn_(*msg);
-            fan(std::move(parent), &out, sizeof(TOut));
+            if (slot_.direct != nullptr) {
+              fan(slot_.direct->value(), &out, sizeof(TOut));
+            } else {
+              core::Lineage staged = slot_.pop();
+              fan(staged, &out, sizeof(TOut));
+            }
           }
         },
         this);
@@ -840,7 +851,7 @@ class FastMapStage final : public StageHolder, public FastStageBase {
   [[nodiscard]] const void* dispatcher_owner() const override { return this; }
 
  private:
-  void fan(core::Lineage&& parent, const void* data, std::size_t size) {
+  void fan(core::Lineage& parent, const void* data, std::size_t size) {
     const std::uint64_t seq = seq_++;
     parent.add_hop(core::LineageHop{.channel = out_channel_, .seq = seq});
     if (rt_.recording_active()) {
@@ -905,7 +916,7 @@ class FastJoinStage final : public StageHolder, public FastStageBase {
         core::Lineage merged = slot_a_.pop();
         merged.merge(slot_b_.pop());
         TC out = fn_(*a, *b);
-        fan(std::move(merged), &out, sizeof(TC));
+        fan(merged, &out, sizeof(TC));
       }
       drain_guard_.clear(std::memory_order_release);
     });
@@ -922,7 +933,7 @@ class FastJoinStage final : public StageHolder, public FastStageBase {
   [[nodiscard]] const void* dispatcher_owner() const override { return visitor_.get(); }
 
  private:
-  void fan(core::Lineage&& merged, const void* data, std::size_t size) {
+  void fan(core::Lineage& merged, const void* data, std::size_t size) {
     const std::uint64_t seq = seq_++;
     merged.add_hop(core::LineageHop{.channel = out_channel_, .seq = seq});
     if (rt_.recording_active()) {
@@ -967,7 +978,11 @@ class FastSinkStage final : public StageHolder {
         core::channel_id_for(channel), buffer_.get(),
         [this] {
           while (T* msg = buffer_->try_fetch()) {
-            fn_(*msg, slot_.pop());
+            if (slot_.direct != nullptr) {
+              fn_(*msg, slot_.direct->value());
+            } else {
+              fn_(*msg, slot_.pop());
+            }
           }
         },
         this);
