@@ -61,7 +61,7 @@ M2 MVP 上车  →  M3 认证就绪
 | # | 假设 | 验证标准 | 失败兜底 |
 |---|---|---|---|
 | H1 | trace 能捕获所有数据流操作 | examples/* 全覆盖，输出与手写 100% 一致 | RAII guard 加强 + 显式 escape hatch |
-| H2 | codegen 产物性能 ≈ 手写 | **门语义 v3（[ADR-0034](./adr/0034-gate-semantics-v3.md)，2026-09-17）**：主承诺 = 加性分解 `diff ≤ F + k×跳数 + m×扇出支数`，k ≤ 2ns/跳（类型擦除地板，随 [ADR-0035](./adr/0035-per-fn-instantiation.md) 落地重论证）、F ≤ 20ns/消息、m 待定——空算子五形状（同语义基线，金标准携带 lineage）协议 v2 同轮差值直接量取；从承诺 = 每消息算子工作量 W ≥ (F+k×hops)/1% 时 P99 差 <1%（加性已实证：负载 ×18 差值恒定，r2-rounds/heavy*）。前史：ADR-0032 D5 的 max(1%, 2ns/跳) 为本语义前身 | pass 调优 + ADR-0035 算子直呼；若仍不达标 → 方案回炉 |
+| H2 | codegen 产物性能 ≈ 手写 | **✅ 已验证（2026-09-18 正式判决，[compiler.md §7](../arch/modules/compiler.md)）**：门语义 v3（[ADR-0034](./adr/0034-gate-semantics-v3.md)）下五形状同轮差值全部 ≤0（short -1/-1/-1 一字不差 / medium -40~-50 / long -110~-111 / fan-in -3817~-5841 / fan-out -20~-30）——加性预算（F≤20ns、k≤2ns/跳）以 ≤0 满足，编译产物达到或反超同语义手写装配（fan-in 领先 = join 机器对 mutex 手写的真实优势，ADR-0037 并发等价）。证据 r2-rounds/verdict-*；战役全程预言对账记录在 compiler.md §7 | —（完成；后续优化走绝对延迟轨道） |
 | H3 | RTA 的 WCET 估计准确 | Apollo 实测 P99.9 × 1.0~1.3 | profile-guided 校准 |
 
 ### 1.1 最小可跑子集（4 周）

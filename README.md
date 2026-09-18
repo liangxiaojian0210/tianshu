@@ -78,7 +78,7 @@ const auto flow = b.build();  // 逐消息血缘自动携带；ADR-0030 落地�
 | 阶段 | 状态 |
 |---|---|
 | Phase 0：奠基期（仓库 / 文档 / CI） | ✅ 完成（2026-08） |
-| Phase 1：PoC（验证三个核心假设） | 🟡 进行中——DSL v0 / 血缘 / 记录回放 / SLA v0 已落地；L1 codegen（H2）为主战场 |
+| Phase 1：PoC（验证三个核心假设） | 🟡 进行中——H1（逐字节等价）✅、**H2（产物对标手写）✅ 2026-09-18**、H3（WCET 估计）待验证；收尾项：`ti compile` CLI / `ti launch` 接线 |
 | Phase 2：MVP（替换 Apollo perception mainboard） | ⏳ |
 | Phase 3：认证就绪（ISO 26262 ASIL-D） | ⏳ |
 

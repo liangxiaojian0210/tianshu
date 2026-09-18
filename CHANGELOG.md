@@ -53,6 +53,27 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 Phase 1 PoC — in progress.
 
+### H2 formally verified: PASS (2026-09-18, quiet-window verdict rounds)
+
+- Formal verdict per the §6.1 v2 protocol, three shielded rounds
+  (evidence r2-rounds/verdict-*): same-round diffs (compiled minus
+  handwritten) are <= 0 on every p50 measurement across all five
+  shapes — short -1/-1/-1 (three rounds identical), medium -40..-50,
+  long -110..-111, fan-in -3817..-5841, fan-out -20..-30; p99
+  negative everywhere except one fan-in scheduler-tail round (the
+  documented ADR-0037 D3 environmental item). All v3 additive budgets
+  (F <= 20 ns, k <= 2 ns/hop) satisfied at <= 0, and the
+  workload-conditioned percentage corollary holds trivially at any W.
+  The compiled artifact now meets or beats the same-semantics
+  handwritten assembly on the adversarial empty-operator rig: linear
+  parity comes from per-fn direct calls plus in-place direct-slot
+  access, and the fan-in lead is the framework's join machinery
+  (atomic inboxes + single-flight guard) genuinely outperforming
+  reasonable handwritten mutex synchronization (ADR-0037).
+- Roadmap/compiler module page/README status updated; H2 closed.
+  Remaining Phase 1 tail: ti compile CLI, ti launch replay wiring,
+  H3 (WCET estimation accuracy).
+
 ### In-place direct-slot access: all five shapes at-or-better than handwritten
 
 - DirectSlot exposes value() — an in-place reference under the ADR-0036
