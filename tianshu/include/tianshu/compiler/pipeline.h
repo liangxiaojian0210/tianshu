@@ -58,6 +58,8 @@ class CompiledFlow {
   [[nodiscard]] bool valid() const { return install_ != nullptr; }
   // No compiler / compilation failed: run() uses the interpreter.
   [[nodiscard]] bool degraded() const { return degraded_; }
+  // Why the interpreter fallback was taken; empty unless degraded.
+  [[nodiscard]] const std::string& degraded_reason() const { return degraded_reason_; }
   [[nodiscard]] bool from_cache() const { return from_cache_; }
   [[nodiscard]] const std::string& hash() const { return hash_; }
   [[nodiscard]] const std::string& artifact_path() const { return artifact_; }
@@ -73,6 +75,7 @@ class CompiledFlow {
   void* handle_{nullptr};
   void* install_{nullptr};
   bool degraded_{false};
+  std::string degraded_reason_;
   bool from_cache_{false};
   std::string hash_;
   std::string artifact_;

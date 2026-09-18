@@ -11,7 +11,13 @@ cc_binary(
 cc_binary(
     name = "ti-launch",
     srcs = ["ti_launch_main.cc"],
-    deps = ["//tianshu"],
+    # -rdynamic: unify the registry's inline static-local head with
+    # dlopened providers' copies (same rationale as the CMake side).
+    linkopts = ["-rdynamic"],
+    deps = [
+        "//tianshu",
+        "//tianshu:tianshu_compiler",
+    ],
 )
 
 cc_binary(
@@ -24,4 +30,16 @@ cc_binary(
     name = "ti-info",
     srcs = ["ti_info_main.cc"],
     deps = ["//tianshu"],
+)
+
+cc_binary(
+    name = "ti-compile",
+    srcs = ["ti_compile_main.cc"],
+    # -rdynamic: unify the registry's inline static-local head with
+    # dlopened providers' copies (same rationale as the CMake side).
+    linkopts = ["-rdynamic"],
+    deps = [
+        "//tianshu",
+        "//tianshu:tianshu_compiler",
+    ],
 )

@@ -64,7 +64,7 @@ bool is_executable_on_path(const std::string& name, std::string* found) {
 std::vector<std::string> discover_ti_tools() {
   std::vector<std::string> verbs;
   std::string unused;
-  for (const char* probe : {"launch", "monitor", "console", "ctl", "inspect"}) {
+  for (const char* probe : {"launch", "monitor", "compile", "info", "console", "ctl", "inspect"}) {
     if (is_executable_on_path(std::string("ti-") + probe, &unused)) {
       verbs.emplace_back(probe);
     }

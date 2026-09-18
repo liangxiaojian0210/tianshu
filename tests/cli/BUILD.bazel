@@ -1,0 +1,51 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_test(
+    name = "ti_info_calibrate_test",
+    size = "small",
+    srcs = ["ti_info_calibrate_test.cc"],
+    deps = [
+        "//tianshu",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "ti_compile_test",
+    size = "small",
+    srcs = ["ti_compile_test.cc"],
+    deps = [
+        "//tianshu",
+        "//tianshu:tianshu_compiler",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Provider .so for the --flows dlopen mechanism; the ctest side runs the
+# binary via TI_BIN_DIR (bazel runs skip when it is unset).
+cc_binary(
+    name = "libti_compile_test_flows.so",
+    srcs = ["ti_compile_test_flows.cc"],
+    linkshared = True,
+    deps = ["//tianshu"],
+)
+
+cc_test(
+    name = "ti_launch_flow_test",
+    size = "small",
+    srcs = ["ti_launch_flow_test.cc"],
+    deps = [
+        "//tianshu",
+        "//tianshu:tianshu_compiler",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_binary(
+    name = "libti_launch_flow_test_flows.so",
+    srcs = ["ti_launch_flow_test_flows.cc"],
+    linkshared = True,
+    deps = ["//tianshu"],
+)

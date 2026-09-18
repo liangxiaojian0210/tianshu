@@ -81,6 +81,7 @@ CompiledFlow::CompiledFlow(CompiledFlow&& other) noexcept
     : handle_(std::exchange(other.handle_, nullptr)),
       install_(std::exchange(other.install_, nullptr)),
       degraded_(other.degraded_),
+      degraded_reason_(std::move(other.degraded_reason_)),
       from_cache_(other.from_cache_),
       hash_(std::move(other.hash_)),
       artifact_(std::move(other.artifact_)) {}
@@ -93,6 +94,7 @@ CompiledFlow& CompiledFlow::operator=(CompiledFlow&& other) noexcept {
     handle_ = std::exchange(other.handle_, nullptr);
     install_ = std::exchange(other.install_, nullptr);
     degraded_ = other.degraded_;
+    degraded_reason_ = std::move(other.degraded_reason_);
     from_cache_ = other.from_cache_;
     hash_ = std::move(other.hash_);
     artifact_ = std::move(other.artifact_);
@@ -151,8 +153,9 @@ CompiledFlow Pipeline::compile(const dsl::Flow& flow, const CompileOptions& opti
     // comes from trusted configuration (options/env), not flow input.
     // NOLINTNEXTLINE(cert-env33-c,bugprone-command-processor)
     if (std::system(cmd.c_str()) != 0) {
-      degrade_or_throw(options,
-                       "system compiler failed for " + flow.name() + " (log: " + log_path + ")");
+      compiled.degraded_reason_ =
+          "system compiler failed for " + flow.name() + " (log: " + log_path + ")";
+      degrade_or_throw(options, compiled.degraded_reason_);
       compiled.degraded_ = true;
       return compiled;
     }
@@ -160,13 +163,15 @@ CompiledFlow Pipeline::compile(const dsl::Flow& flow, const CompileOptions& opti
 
   compiled.handle_ = dlopen(compiled.artifact_.c_str(), RTLD_NOW);
   if (compiled.handle_ == nullptr) {
-    degrade_or_throw(options, std::string("dlopen failed: ") + dlerror());
+    compiled.degraded_reason_ = std::string("dlopen failed: ") + dlerror();
+    degrade_or_throw(options, compiled.degraded_reason_);
     compiled.degraded_ = true;
     return compiled;
   }
   compiled.install_ = dlsym(compiled.handle_, "tianshu_flow_install");
   if (compiled.install_ == nullptr) {
-    degrade_or_throw(options, "artifact exports no tianshu_flow_install");
+    compiled.degraded_reason_ = "artifact exports no tianshu_flow_install";
+    degrade_or_throw(options, compiled.degraded_reason_);
     dlclose(std::exchange(compiled.handle_, nullptr));
     compiled.degraded_ = true;
   }
