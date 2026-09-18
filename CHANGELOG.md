@@ -53,6 +53,25 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 Phase 1 PoC — in progress.
 
+### In-place direct-slot access: all five shapes at-or-better than handwritten
+
+- DirectSlot exposes value() — an in-place reference under the ADR-0036
+  same-stack discipline. Fast map callbacks now add_hop directly in the
+  slot storage and fast sink callbacks hand the reference straight to
+  the user callback; non-direct slots keep the pop path, joins are
+  unchanged (inbox pops are pairing semantics). This eliminates the
+  remaining by-value pops on the hop path (the last identified
+  relocation source after the rvalue round).
+- Measured: fan-out diff 20 -> -10..-21 (compiled now FASTER — the
+  in-place path performs fewer constructions than the handwritten
+  rig's copy+move). Five-shape snapshot (3 rounds): short -9..+19 /
+  medium -39..-110 / long -110..-140 / fan-in -3417..-6063 /
+  fan-out -10..-20. H2 has converged from R1's +101..+460 all-FAIL to
+  at-or-better everywhere; formal verdict numbers to be taken in a
+  quiet window (direction consistent across 13 rounds). Lineage keeps
+  its string representation per maintainer ruling (v1 ID proposal
+  rejected). Full suite green (339 ctest + 33 bazel).
+
 ### Fan-out residual causally closed: rvalue lineage hand-off (8289927)
 
 - Cause nailed with instruction-sampled perf: the entire 40 ns fan-out
