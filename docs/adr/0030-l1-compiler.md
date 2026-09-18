@@ -80,7 +80,7 @@ v0 管线在**进程内一次执行**（`pipeline::compile(Flow) → CompiledFlo
 解释执行仅作回归参考（预期显著慢于两者，差距本身是编译器价值的数据）。
 
 失败处理沿用 roadmap：1-5% 调 pass（融合、`__attribute__((flatten))`）；>5% 修订 codegen
-策略；>20% 触发架构回炉评审。
+策略；>20% 触发架构重设计评审。
 
 ### D6：escape hatch 与安全姿态
 

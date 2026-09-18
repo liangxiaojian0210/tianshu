@@ -3,7 +3,7 @@
 - **状态**：已接受（2026-09-17 实施）
 - **日期**：2026-09-17
 - **决策者**：Pride Leong
-- **关联**：[adr/0032](./0032-per-message-specialization.md)（通道计划与 inbox 并发纪律） · [adr/0034](./0034-gate-semantics-v3.md)（k 预算） · [adr/0035](./0035-per-fn-instantiation.md)（前一刀：fn 直呼后 k≈4.2ns/跳）
+- **关联**：[adr/0032](./0032-per-message-specialization.md)（通道计划与 inbox 并发纪律） · [adr/0034](./0034-gate-semantics-v3.md)（k 预算） · [adr/0035](./0035-per-fn-instantiation.md)（前一项：fn 直呼后 k≈4.2ns/跳）
 
 ---
 

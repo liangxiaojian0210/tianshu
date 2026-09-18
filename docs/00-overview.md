@@ -210,7 +210,7 @@ REGISTER_TRACEABLE_FLOW("perception_flow", perception_flow);
 | H2 | codegen 产物性能 ≈ 手写 | 两层语义（[ADR-0034](./adr/0034-gate-semantics-v3.md)）：主承诺 = 加性分解 `diff ≤ F + k×跳数 + m×扇出支数`（k ≤ 2ns/跳、F ≤ 20ns/消息、m 待定），空算子五形状直接量取；从承诺 = W ≥ (F+k×hops)/1% 时 P99 差 <1% | 引入 pass 调优与 ADR-0035 算子直呼；若仍不达标则触发方案修订 |
 | H3 | RTA 的 WCET 估计准确 | Apollo 实测 P99.9 × 1.0 ~ 1.3 | profile-guided 校准 |
 
-任一假设失败 → **专利新颖性失效**，需要回炉。
+任一假设失败 → **专利新颖性失效**，需要重新设计。
 
 ---
 
