@@ -765,7 +765,7 @@ SourceEntry::SourceEntry(FlowRuntime& rt, const Flow& flow, std::string channel)
   slots_ = std::move(binding.slots);
 }
 
-void SourceEntry::publish_bytes(const void* data, std::size_t size, core::Lineage lineage) {
+void SourceEntry::publish_bytes(const void* data, std::size_t size, core::Lineage&& lineage) {
   if (!specialized_ || rt_.recording_active()) {
     rt_.publish_bytes(channel_, data, size, std::move(lineage));
     return;

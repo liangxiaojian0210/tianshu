@@ -840,7 +840,7 @@ class FastMapStage final : public StageHolder, public FastStageBase {
   [[nodiscard]] const void* dispatcher_owner() const override { return this; }
 
  private:
-  void fan(core::Lineage parent, const void* data, std::size_t size) {
+  void fan(core::Lineage&& parent, const void* data, std::size_t size) {
     const std::uint64_t seq = seq_++;
     parent.add_hop(core::LineageHop{.channel = out_channel_, .seq = seq});
     if (rt_.recording_active()) {
@@ -922,7 +922,7 @@ class FastJoinStage final : public StageHolder, public FastStageBase {
   [[nodiscard]] const void* dispatcher_owner() const override { return visitor_.get(); }
 
  private:
-  void fan(core::Lineage merged, const void* data, std::size_t size) {
+  void fan(core::Lineage&& merged, const void* data, std::size_t size) {
     const std::uint64_t seq = seq_++;
     merged.add_hop(core::LineageHop{.channel = out_channel_, .seq = seq});
     if (rt_.recording_active()) {
@@ -1226,7 +1226,7 @@ class SourceEntry {
     publish_bytes(&msg, sizeof(T), core::Lineage::rooted(channel_, seq));
   }
 
-  void publish_bytes(const void* data, std::size_t size, core::Lineage lineage);
+  void publish_bytes(const void* data, std::size_t size, core::Lineage&& lineage);
 
  private:
   FlowRuntime& rt_;
