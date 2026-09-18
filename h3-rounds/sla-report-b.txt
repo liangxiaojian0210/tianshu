@@ -1,0 +1,8 @@
+--- SLA report (load-time, ADR-0029) ---
+sla report: OK
+  budget: h3/fanin/b 3344us
+  budget: h3/fanin/j 855us
+  budget: h3/micro/m1 985us
+  budget: h3/micro/m2 1354us
+  budget: h3/milli/m3 4979us
+  budget: h3/milli/m4 24960us

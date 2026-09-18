@@ -34,6 +34,14 @@ cc_binary(
 )
 
 cc_binary(
+    name = "h3_wcet_rig",
+    srcs = ["h3_wcet_rig.cc"],
+    deps = [
+        "//tianshu",
+    ],
+)
+
+cc_binary(
     name = "codegen_vs_handwritten",
     srcs = ["codegen_vs_handwritten.cc"],
     data = ["//tianshu:headers"],

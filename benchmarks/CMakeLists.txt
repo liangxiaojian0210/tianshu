@@ -13,6 +13,9 @@ target_compile_options(object_pool_benchmark PRIVATE -Wno-c2y-extensions)
 add_executable(shm_transport_benchmark shm_transport_benchmark.cc)
 target_link_libraries(shm_transport_benchmark PRIVATE tianshu pthread)
 
+add_executable(h3_wcet_rig h3_wcet_rig.cc)
+target_link_libraries(h3_wcet_rig PRIVATE tianshu pthread)
+
 add_executable(lineage_benchmark lineage_benchmark.cc)
 target_link_libraries(lineage_benchmark PRIVATE tianshu benchmark::benchmark)
 target_compile_options(lineage_benchmark PRIVATE -Wno-c2y-extensions)
