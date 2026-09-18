@@ -53,6 +53,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 Phase 1 PoC — in progress.
 
+### Fan-out residual causally closed: rvalue lineage hand-off (8289927)
+
+- Cause nailed with instruction-sampled perf: the entire 40 ns fan-out
+  residual concentrated in std::string move construction (7.77% vs
+  0.89% instruction share vs the handwritten rig ~= 30 ns/message) —
+  the compiled path moved each Lineage ~17x per message (slot pop ->
+  local -> by-value fan parameter -> slot push, times 4 branches) vs
+  the rig's 4 in-place slot accesses, and every SSO string rides each
+  move as an out-of-line constructor call.
+- Fix: FastMap/FastJoin fan() and SourceEntry::publish_bytes take
+  Lineage&& (no by-value materialization). Verified end to end: diff
+  40 -> 20 ns (10-round mode, under load; quiet window pending for the
+  formal number) and the string-move instruction share dropped 7.77%
+  -> 1.66% exactly as the causal model predicts. Remaining ~20 ns =
+  out-of-line DirectSlot::push virtuals (~2.48% share, 9-10 ns) plus
+  round noise. No VERSION bump: H1 byte-equivalence holds (339 ctest
+  + 33 bazel), artifacts unaffected (host-side internals only).
+
 ### Typed slot refs for fast stages (ADR-0036 follow-up) + VERSION 0.1.2
 
 - Fast map/join/sink stages now pop their input lineage through a
