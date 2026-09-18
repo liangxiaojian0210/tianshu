@@ -2,7 +2,7 @@
 
 > **文档定位**：4 阶段实施路线图，从奠基到认证就绪（叙事文档）。
 > **维护者**：Pride Leong
-> **状态**：v0.2（2026-09-09）· Phase 0 **完成** · Phase 1 **进行中**
+> **状态**：v0.3（2026-09-18）· Phase 0 **完成** · Phase 1 **进行中**（三假设全绿，M1 收尾项剩 PoC demo 视频与 benchmark 数据公开）
 > **关联**：[00-overview.md](./00-overview.md) · [adr/0001-dsl-form.md](./adr/0001-dsl-form.md) · [adr/0002-cyber-relation.md](./adr/0002-cyber-relation.md)
 
 ---
@@ -62,7 +62,7 @@ M2 MVP 上车  →  M3 认证就绪
 |---|---|---|---|
 | H1 | trace 能捕获所有数据流操作 | examples/* 全覆盖，输出与手写 100% 一致 | RAII guard 加强 + 显式 escape hatch |
 | H2 | codegen 产物性能 ≈ 手写 | **✅ 已验证（2026-09-18 正式判决，[compiler.md §7](../arch/modules/compiler.md)）**：门语义 v3（[ADR-0034](./adr/0034-gate-semantics-v3.md)）下五形状同轮差值全部 ≤0（short -1/-1/-1 一字不差 / medium -40~-50 / long -110~-111 / fan-in -3817~-5841 / fan-out -20~-30）——加性预算（F≤20ns、k≤2ns/跳）以 ≤0 满足，编译产物达到或反超同语义手写装配（fan-in 领先 = join 机器对 mutex 手写的真实优势，ADR-0037 并发等价）。证据 r2-rounds/verdict-*；全程预言对账记录在 compiler.md §7 | —（完成；后续优化走绝对延迟轨道） |
-| H3 | RTA 的 WCET 估计准确 | Apollo 实测 P99.9 × 1.0~1.3 | profile-guided 校准 |
+| H3 | RTA 的 WCET 估计准确 | **✅ 已验证（2026-09-18 判定 PASS，[ADR-0038](./adr/0038-h3-verification-semantics.md)）**：原方法（Apollo workload）不可复现于本仓库，适配为两轮预测力协议——Round A 标定 ×3 → 声明 `1.3×A_med` → Round B 新进程实测 ×3，7 stage 硬门（`B_r ≤ 1.3×A_med`）全过、`B_med ≥ A_med`、ε ≤ 9.80%（环境判据 10% 内）；漂移告警路径可机判（`--wcet`，rc 契约）。证据 [h3-rounds/REPORT.md](../h3-rounds/REPORT.md) | —（完成；固定优先级 RTA 仍属 Phase 2，ADR-0029 边界不变） |
 
 ### 1.1 最小可跑子集（4 周）
 
@@ -137,12 +137,14 @@ M2 MVP 上车  →  M3 认证就绪
 - 估算 < 实测 → 太乐观，可能导致运行时违反 SLA（不可接受）
 - 估算 > 实测 × 1.3 → 太保守，可能导致 SLA 不可满足（虽然安全但不可用）
 
+> **✅ 判定（2026-09-18，[ADR-0038](./adr/0038-h3-verification-semantics.md)）**：按两轮预测力协议验证 PASS——标定建议值（1.3×A_med）在盾内三轮 A/B 中全部落在 [实测 P99.9, 实测 P99.9 × 1.3] 窗内（7 stage，ε ≤ 9.80%）。原「Apollo 实测」输入替换为确定性自旋 rig（诚实等价，ADR-0038 D3）；「RTA 估算」在 as-built 语义下 = 校准回路建议值（固定优先级 RTA 属 Phase 2）。证据：[h3-rounds/](../h3-rounds/)。
+
 ### Phase 1 退出条件（M1）
 
-- [ ] H1 全绿（trace 覆盖率 100%）
-- [ ] H2 全绿（5 类链路 P99 差 ≤ max(1%, 2ns/跳)，同语义基线；M-C 特化已落地，正式判决待空闲窗口取数）
-- [ ] H3 全绿（RTA 估算落在合理区间）
-- [ ] 三个核心假设的验证报告归档（含原始数据 + 复现脚本）
+- [x] H1 全绿（逐字节等价，14 用例锁定：`tests/dsl/specialize_test.cc`）
+- [x] H2 全绿（2026-09-18 正式判决 PASS：五形状同轮差值全部 ≤0，门语义 v3 [ADR-0034](./adr/0034-gate-semantics-v3.md)；证据 r2-rounds/）
+- [x] H3 全绿（2026-09-18 判定 PASS：两轮预测力协议 [ADR-0038](./adr/0038-h3-verification-semantics.md)；证据 h3-rounds/）
+- [x] 三个核心假设的验证报告归档（H1：specialize_test.cc 可复现；H2：r2-rounds/ + [compiler.md §7](./arch/modules/compiler.md)；H3：h3-rounds/REPORT.md 含原始数据与复现命令）
 - [ ] PoC demo 视频 + benchmark 数据公开
 
 **M1 失败处理**：任一假设失败 → 暂停 Phase 2 启动，召开方案修订会议，可能触发专利修订。
@@ -273,11 +275,12 @@ M2 MVP 上车  →  M3 认证就绪
 
 ---
 
-## 当前进度（2026-09-09）
+## 当前进度（2026-09-18）
 
 | 项 | 状态 |
 |---|---|
 | Phase 0 全部任务（0.1–0.6） | ✅ 完成（2026-08，M0 通过：双构建零警告 CI / 253 测试 / 覆盖率管线） |
 | Phase 1 · 1.1 最小可跑子集 | ✅ 超额完成——L4 全栈 + DSL v0 + 血缘 + kAuto + record v2 + SLA v0 均已落地（细节见 [arch/](./arch/README.md)） |
-| Phase 1 · H1/H2/H3 验证 | 🟡 H2 主战场：M-C 逐消息特化已落地（ADR-0032），正式判决待空闲窗口取数（MC-4） |
+| Phase 1 · H1/H2/H3 验证 | ✅ 三假设全绿（2026-09-18）：H1 逐字节等价 14 用例；H2 正式判决 PASS（五形状同轮差值 ≤0，[compiler.md §7](./arch/modules/compiler.md) + r2-rounds/）；H3 判定 PASS（两轮预测力协议，[ADR-0038](./adr/0038-h3-verification-semantics.md) + h3-rounds/） |
+| Phase 1 · M1 收尾项 | 🟡 PoC demo 视频与 benchmark 数据公开 |
 | Phase 2 / Phase 3 | ⏳ |

@@ -6,6 +6,71 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — ti compile offline CLI (ADR-0030 M-B)
+
+- new `ti-compile` binary (`ti-compile <flow-name>`): name-based
+  dry-run trace (the build IS the trace, SLA verdict printed as a
+  one-liner) followed by Pipeline::compile; prints valid/degraded
+  (degraded carries a reason line, greppable by automation), the
+  artifact .so path, and cache hit/miss; exports the .dag/.conf audit
+  pair next to the artifact via IrGraph::export_dag/export_conf
+- `--flows PATH` (repeatable): dlopen RTLD_NOW|RTLD_LOCAL provider
+  .so files whose REGISTER_TRACEABLE_FLOW static-init nodes populate
+  the process-local flow registry (the executable is linked with
+  --export-dynamic so the registry head's inline static-local unifies
+  across the dlopen boundary); `--list` prints registered names after
+  provider loading
+- `--cache-dir DIR` (default CompileOptions cache), `--compiler CXX`
+  (default $CXX or c++), `--emit-source` (print the generated .gen.cc
+  to stdout), `--no-fallback` (compile failure is rc 1 instead of the
+  default degraded rc 0); exit codes: 0 success (valid or degraded
+  fallback), 1 unknown flow (stderr lists registered names) / provider
+  load failure / compile failure under --no-fallback, 2 usage errors
+- CompiledFlow gains a read-only degraded_reason() getter (the three
+  degrade sites in pipeline.cc record why the interpreter fallback
+  was taken)
+- the `ti` dispatcher verb probe list now includes compile and info
+  (closes the documented gap where `ti info` dispatched but never
+  appeared in the no-argument usage listing)
+- tests: tests/cli/ti_compile_test.cc (7 cases, TI_BIN_DIR subprocess
+  pattern) + provider library tests/cli/ti_compile_test_flows.cc
+
+### Added — ti launch flow-name mode (ADR-0030 M-D)
+
+- `ti-launch <flow-name> [--flows PATH]...`: the positional argument
+  resolves to a DagConfig file path when it names an existing readable
+  regular file (original behavior, backward compatible) and to a flow
+  name otherwise; flow mode loads --flows providers (same dlopen
+  semantics as ti-compile), dry-run builds the registered flow (SLA
+  verdict one-liner), compiles it via Pipeline::compile (valid or
+  degraded, printed), installs the compiled product on a FlowRuntime
+  (install-only run, duration 0), then runs until SIGINT/SIGTERM with
+  the launcher.cc directed-wait pattern (sigtimedwait 50ms naps +
+  50ms run_sources windows; teardown follows the
+  traceable_flow_demo.cc declaration order) and exits 0
+- exit codes: 0 normal shutdown; 1 when the argument is neither a
+  readable file nor a registered flow (stderr names both
+  interpretations and lists registered names) and on parse/assembly
+  failures; 2 on usage errors, including --mode given in flow mode
+  (--mode stays a DAG-file-mode flag) and --flows given in file mode
+- known v0 limitation (documented in cli.md 3.4): run_sources windows
+  re-fire op/stateful bootstrap hooks once per window
+- tests: tests/cli/ti_launch_flow_test.cc (4 cases, TI_BIN_DIR
+  subprocess pattern) + provider library
+  tests/cli/ti_launch_flow_test_flows.cc (tick_writer flow appending
+  one line per message to $TI_LAUNCH_TEST_OUT)
+
+### Fixed
+
+- SlaAnalyzer backtracker state leak across endpoints: worst_path()
+  kept the previous endpoint's best path, so a later endpoint with a
+  smaller deadline inherited an earlier endpoint's larger worst path
+  as a false violation (multi-endpoint flows analyzed in declaration
+  order). Fixed by resetting the per-walk best per endpoint; the H3
+  rig's ascending-deadline endpoint sort is now deterministic-output
+  only. Regression: SlaTest.EndpointsDoNotShareWorstPath (red-proven
+  by disabling the fix).
+
 ### Per-message path specialization — M-C (ADR-0032)
 
 - `FlowRuntime::wire_specialized(flow)` / `begin_specialize(flow)`: install
@@ -52,6 +117,28 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   install ABI changed)
 
 Phase 1 PoC — in progress.
+
+### H3 formally verified: PASS (2026-09-18, two-round predictive-power protocol)
+
+- Phase 1's last hypothesis closed per ADR-0038: the calibration loop's
+  round-A suggestion (WCET = 1.3 x median p99.9, three shielded runs)
+  safely and usefully bounds round B's in-context p99.9 (three fresh
+  shielded processes with the declarations and SLA installed) on all
+  seven rig stages — hard gate B_r <= 1.3 x A_med holds on every
+  round, B_med >= A_med on every stage, noise eps <= 9.80% (within the
+  10% environment criterion). Evidence: h3-rounds/ (run-a/b archives,
+  drift demos, h3_verdict.sh, REPORT.md).
+- ti-info --calibrate gains --wcet NAME=US[,...]: DECLARED and RATIO
+  columns plus DRIFT-HIGH / DRIFT-LOW verdicts against the suggestion
+  (symmetric 3x reading of ADR-0029 D2, now machine-checkable):
+  rc 3 on any drift, rc 2 on usage errors. ADR-0029 Phase 1
+  acceptance demonstrated: 4x-inflated declarations -> 7 DRIFT-HIGH
+  lines + rc 3; in-window declarations -> rc 0.
+- New measurement rig benchmarks/h3_wcet_rig.cc (three branches, seven
+  stages, deterministic spin kernels, ~50us..5ms) and shield runner
+  tools/h3_shield.sh (h2_shield isolation recipe). New tests:
+  tests/cli/ti_info_calibrate_test.cc (6 cases, TI_BIN_DIR subprocess
+  pattern); full suite green (345 ctest + 34 bazel).
 
 ### H2 formally verified: PASS (2026-09-18, quiet-window verdict rounds)
 

@@ -221,6 +221,6 @@ REGISTER_TRACEABLE_FLOW("perception_flow", perception_flow);
 | DSL 选型（fluent builder + auto trace） | ✅ 定（ADR-0001） |
 | 与 Cyber RT 关系（独立实现） | ✅ 定（ADR-0002） |
 | 仓库骨架（目录、文档、CI） | ✅ 完成（2026-08，M0 通过） |
-| Phase 1 PoC | 🟡 进行中——L4 全栈（PRIM/SCHED/CORE/TRANS）、DSL v0 + 血缘、kAuto、record v2、SLA v0 已落地；L1 codegen（H2）为主战场（详见 [arch/](./arch/README.md) 状态表） |
+| Phase 1 PoC | 🟡 进行中——L4 全栈（PRIM/SCHED/CORE/TRANS）、DSL v0 + 血缘、kAuto、record v2、SLA v0 已落地；三假设全绿（2026-09-18）：H1 逐字节等价 · H2 对标手写 · H3 校准预测力（[ADR-0038](./adr/0038-h3-verification-semantics.md)）；M1 收尾项剩 demo 视频与数据公开（详见 [arch/](./arch/README.md) 状态表） |
 | MVP（替换 Apollo perception 链路） | ⏳ Phase 2 |
 | 认证就绪（ISO 26262 ASIL-D） | ⏳ Phase 3 |

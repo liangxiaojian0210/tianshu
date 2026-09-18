@@ -56,7 +56,7 @@
 |---|---|---|---|---|---|---|
 | `desktop` | x86_64 / aarch64（开发机） | Linux / macOS | 8+ | 16GB+ | 无限制 | 开发、调试、单元测试 |
 | `server` | x86_64（云服务器） | Linux | 16+ | 64GB+ | 无限制 | 训练、仿真、replay、batch |
-| `vehicle` | aarch64（ORIN / J5） / x86_64（ADL） | Linux / QNX | 8-12 | 8-32GB | < 50MB | 车端实时控制（**主战场**） |
+| `vehicle` | aarch64（ORIN / J5） / x86_64（ADL） | Linux / QNX | 8-12 | 8-32GB | < 50MB | 车端实时控制（**核心目标域**） |
 | `embedded` | ARM Cortex-A53/55/72 | Embedded Linux / RT-Linux | 1-4 | 256MB-1GB | < 10MB | 机器人控制器、边缘 Box、工业 PC |
 | `mcu` | ARM Cortex-M7/M33、RISC-V RV32/RV64 | FreeRTOS / Zephyr / RT-Thread / bare-metal | 1 | 256KB-1MB RAM | < 1MB | 传感器节点、底层执行器、安全 MCU |
 

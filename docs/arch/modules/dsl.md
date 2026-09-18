@@ -24,7 +24,7 @@
 
 **不做什么**：
 
-- **不做 L1 编译**：codegen 是 [ADR-0030](../../adr/0030-l1-compiler.md) 的主战场。**解释执行与 L1 编译的边界是"同图同 IR"**——`Flow` 声明图就是编译器的 IR 输入（`IrGraph::from_flow(flow)` 直接消费），解释器只是这个 IR 的第一个消费者；`wire()` / `run_sources()` 刻意拆开，让编译产物安装自己的特化 wiring 后驱动同一个 run loop（见 `traceable_flow_demo.cc` 的 `Pipeline::compile` → `compiled.run(runtime, flow, ...)`）。
+- **不做 L1 编译**：codegen 属 [ADR-0030](../../adr/0030-l1-compiler.md) 范围。**解释执行与 L1 编译的边界是"同图同 IR"**——`Flow` 声明图就是编译器的 IR 输入（`IrGraph::from_flow(flow)` 直接消费），解释器只是这个 IR 的第一个消费者；`wire()` / `run_sources()` 刻意拆开，让编译产物安装自己的特化 wiring 后驱动同一个 run loop（见 `traceable_flow_demo.cc` 的 `Pipeline::compile` → `compiled.run(runtime, flow, ...)`）。
 - **不做调度与传输**：复用 core 的 `DataDispatcher` / `DataVisitor` / `Component` 体系；解释器主路径零 transport 依赖（`from()` 桥除外，走 INTRA 泵回）。
 - **不承诺并行度**：v0 单线程同步级联语义（每条链在其 source 线程内贯通）——并行化是 L1 编译器 + SLA 规划（L3）的事；解释器 benchmark 结论不外推到编译产物。
 - **不做 fallback 热切换**：v0 只产生信号（事件计数 + 最后违规端点）；停源、排空、按名重建 fallback 流的 runtime 属 v1（需 quiesce 语义配合，单独评审）。

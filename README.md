@@ -46,7 +46,7 @@ const auto flow = b.build();  // 逐消息血缘自动携带；ADR-0030 落地�
                               // 同一张图编译为原生 .so，性能对标手写代码
 ```
 
-`ti launch` 加载时：trace 出全局数据流图 → 六阶段编译（ADR-0030）→ 生成 `.so` + `.dag` + `.conf` → 加载运行，**运行时直接执行编译产物，不经解释器**（当前为解释执行，codegen 属 Phase 1 主战场）。
+`ti launch <flow名>` 加载时：按名 dry-run trace 出全局数据流图 → 六阶段编译（ADR-0030）→ 生成 `.so` + `.dag` + `.conf` → 加载运行，**运行时直接执行编译产物，不经解释器**（M-D 已接线；`ti compile` 提供离线预编译，H2 判决见 [ADR-0034](docs/adr/0034-gate-semantics-v3.md)）。
 
 ## 核心特性
 
@@ -57,7 +57,7 @@ const auto flow = b.build();  // 逐消息血缘自动携带；ADR-0030 落地�
 | **逐消息血缘** | 每条消息可溯源至根（实测 desktop-release：建根 21ns、单跳链 51ns/消息、移动 0.2ns）；丢帧自动重放/降级 | [ADR-0022](./docs/adr/0022-lineage-v0.md) · [0026](./docs/adr/0026-slice-input-model.md) |
 | **状态即数据 + 故障恢复** | 版本化状态通道 + 恢复协议，进程重启后输出 **EXACT MATCH** 一致 | [ADR-0027](./docs/adr/0027-state-as-data-channel-taxonomy.md) |
 | **记录与回放** | record v2：血缘入库、分块压缩（LZ4/ZSTD）、分片合并；离线回放输出与在线逐字节一致 | [ADR-0028](./docs/adr/0028-record-format-v1.md) |
-| **加载期编译（Phase 1 进行中）** | 六阶段管线：trace → 分析 → 优化 → SLA 规划 → 源码 codegen → `.so` 装载；验收门为加性开销常数（k ≤ 2ns/跳级）+ 负载条件化 <1%（[ADR-0034](./docs/adr/0034-gate-semantics-v3.md)） | [ADR-0030](./docs/adr/0030-l1-compiler.md) · [0034](./docs/adr/0034-gate-semantics-v3.md) |
+| **加载期编译（H2 判决 PASS）** | 六阶段管线：trace → 分析 → 优化 → SLA 规划 → 源码 codegen → `.so` 装载；验收门为加性开销常数（k ≤ 2ns/跳级）+ 负载条件化 <1%（[ADR-0034](./docs/adr/0034-gate-semantics-v3.md)）；`ti launch <flow名>` / `ti compile` 已接线（ADR-0030 M-B/M-D） | [ADR-0030](./docs/adr/0030-l1-compiler.md) · [0034](./docs/adr/0034-gate-semantics-v3.md) |
 
 > 设计就绪、按 Phase 渐进：GPU 加速与调度（[ADR-0006](./docs/adr/0006-gpu-acceleration.md)）· 多语言 SDK（[ADR-0007](./docs/adr/0007-api-spec-multi-language.md)）· 控制台（[ADR-0014](./docs/adr/0014-console.md)）。
 > 工程基线：双构建零警告 CI（[ADR-0003](./docs/adr/0003-build-system.md)/[0004](./docs/adr/0004-build-entry.md)）· 轻架构 5 profile，desktop 已验证（[ADR-0005](./docs/adr/0005-lightweight-multiplatform.md)）。
@@ -78,7 +78,7 @@ const auto flow = b.build();  // 逐消息血缘自动携带；ADR-0030 落地�
 | 阶段 | 状态 |
 |---|---|
 | Phase 0：奠基期（仓库 / 文档 / CI） | ✅ 完成（2026-08） |
-| Phase 1：PoC（验证三个核心假设） | 🟡 进行中——H1（逐字节等价）✅、**H2（产物对标手写）✅ 2026-09-18**、H3（WCET 估计）待验证；收尾项：`ti compile` CLI / `ti launch` 接线 |
+| Phase 1：PoC（验证三个核心假设） | 🟡 进行中——三假设全绿（均 2026-09-18）：H1（逐字节等价）✅、H2（产物对标手写）✅、H3（WCET 校准预测力，[ADR-0038](docs/adr/0038-h3-verification-semantics.md)）✅；收尾项：PoC demo 视频与 benchmark 数据公开 |
 | Phase 2：MVP（替换 Apollo perception mainboard） | ⏳ |
 | Phase 3：认证就绪（ISO 26262 ASIL-D） | ⏳ |
 

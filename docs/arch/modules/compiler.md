@@ -1,10 +1,10 @@
 # L1 编译器（`tianshu/compiler`）
 
-> 状态：🟡 部分实现（**H2 已正式判决 PASS，2026-09-18**——五形状同轮差值全部 ≤0，编译产物达到或反超同语义手写装配；见 §7）。**已在代码**：IR 降维/拓扑/规范化/稳定哈希/`.dag`+`.conf` 导出（M-A 全量）、P1 结构校验、P4 源码 codegen（M-C 特化编排形态，ADR-0032：`.gen.cc` 按 wire() 同序驱动 `begin_specialize`/`specialize`/`finalize`）、P5 系统编译器调用 + 缓存 + dlopen + degraded 回退（M-B 除 `ti compile` CLI 外全量）、**M-C 逐消息特化全量落地**（per-fn 直呼 ADR-0035 / 直槽 ADR-0036 / 类型化槽 / 就地访问）、H2 三方对比装置（五形状全 + 并发等价 ADR-0037）与 D8 运行时优化（L1/L1b/L2a/L2b/L2c）、M-D 的 `REGISTER_TRACEABLE_FLOW` 注册表与 dry-run。**未落地**：P2 optimize pass（descope，见 ADR-0032 D6）、`ti compile` 离线编译 CLI、`ti launch` 启动重放接线
-> 代码：`tianshu/include/tianshu/compiler/{ir.h, pipeline.h, codegen.h}` · `tianshu/src/{ir.cc, pipeline.cc, codegen.cc}`
+> 状态：✅ Phase 1 全量落地（**H2 已正式判决 PASS，2026-09-18**——五形状同轮差值全部 ≤0，编译产物达到或反超同语义手写装配；见 §7）。**已在代码**：IR 降维/拓扑/规范化/稳定哈希/`.dag`+`.conf` 导出（M-A 全量）、P1 结构校验、P4 源码 codegen（M-C 特化编排形态，ADR-0032：`.gen.cc` 按 wire() 同序驱动 `begin_specialize`/`specialize`/`finalize`）、P5 系统编译器调用 + 缓存 + dlopen + degraded 回退、**M-B `ti compile` CLI 已落地**（`ti-compile` 二进制，2026-09-18）、**M-C 逐消息特化全量落地**（per-fn 直呼 ADR-0035 / 直槽 ADR-0036 / 类型化槽 / 就地访问）、H2 三方对比装置（五形状全 + 并发等价 ADR-0037）与 D8 运行时优化（L1/L1b/L2a/L2b/L2c）、**M-D 全链闭环**（`REGISTER_TRACEABLE_FLOW` 注册表 + dry-run + `ti-launch` flow 模式接线，2026-09-18）。**未落地**：P2 optimize pass（descope，见 ADR-0032 D6）
+> 代码：`tianshu/include/tianshu/compiler/{ir.h, pipeline.h, codegen.h}` · `tianshu/src/{ir.cc, pipeline.cc, codegen.cc}` · CLI：`tianshu/cli/ti_compile_main.cc`
 > 关键 ADR：[ADR-0030 L1 编译器](../../adr/0030-l1-compiler.md)（六阶段管线 / M-A~M-D / 缓存键 = 规范化哈希 / D8 分层优化） · [ADR-0032 逐消息特化](../../adr/0032-per-message-specialization.md)（D4 修正 / 通道计划 / H2 门槛重校准） · [ADR-0001 DSL 形式](../../adr/0001-dsl-form.md)（fluent builder + auto trace 路线） · [ADR-0031 降级阶梯](../../adr/0031-fallback-degradation.md)（`fallback_flow` 的 IR 携带与 conf 导出） · [ADR-0029 SLA 编译](../../adr/0029-sla-compilation.md)（P3 的内容）
-> 测试：`tests/compiler/{ir_test.cc, pipeline_test.cc, pipeline_validation_test.cc}` · 基准：`benchmarks/codegen_vs_handwritten.cc` · 示例：`examples/traceable_flow_demo.cc`
-> 最后同步：2026-09-17 · M-C 逐消息特化落地（ADR-0032）
+> 测试：`tests/compiler/{ir_test.cc, pipeline_test.cc, pipeline_validation_test.cc}` · `tests/cli/ti_compile_test.cc`（CLI 面，7 用例） · 基准：`benchmarks/codegen_vs_handwritten.cc` · 示例：`examples/traceable_flow_demo.cc`
+> 最后同步：2026-09-18 · M-B `ti-compile` CLI + M-D `ti-launch` flow 模式接线（ADR-0030）
 
 ## 1. 职责与边界（做什么 / 明确不做什么）
 
@@ -20,7 +20,7 @@
 **明确不做什么（as-built 边界，ADR 目标见 §7）**：
 
 - **不做 P2 优化 pass**（descope，ADR-0032 D6）：直通消除需要 fn 语义可见性，类型擦除后不可判定；结构性改写对 H2 五形状零收益。
-- **不消费自己导出的 `.dag`/`.conf`**：两者是审计/溯源产物；当前唯一装载入口是进程内 `Pipeline::compile`（`ti-launch` 消费的是 core 侧 INI `DagConfig`，与本模块无关）。
+- **不消费自己导出的 `.dag`/`.conf`**：两者是审计/溯源产物；装载入口是进程内 `Pipeline::compile`——`ti-compile`（离线预热）与 `ti-launch` flow 模式（按名 dry-run 后编译运行）都走这一条路，守卫靠运行期重算哈希而非读 `.conf`。
 - **不做静态调度**：codegen 复刻 v0 级联语义，执行模型变更属 Phase 2（[ADR-0019](../../adr/0019-coroutine-strategy.md)）。
 
 ## 2. 公共 API 速览
@@ -42,7 +42,7 @@
 | 类型 / 函数 | 说明 |
 |---|---|
 | `CompileOptions` | `cache_dir`（默认 `"build/tianshu-gen"`，源码与编译日志随 `.so` 同目录供审计）· `compiler`（空 → `$CXX` → `"c++"`）· `allow_fallback`（默认 true；false 时编译失败抛错不降级） |
-| `CompiledFlow` | move-only RAII（析构 `dlclose`）：`valid()`（已装载产物）· `degraded()`（将走解释器）· `from_cache()` · `hash()` · `artifact_path()` · `run(rt, flow, duration)` |
+| `CompiledFlow` | move-only RAII（析构 `dlclose`）：`valid()`（已装载产物）· `degraded()`（将走解释器）· `degraded_reason()`（降级原因，2026-09-18 增补的只读 getter——三个降级点写入，供 CLI 报告）· `from_cache()` · `hash()` · `artifact_path()` · `run(rt, flow, duration)` |
 | `CompiledFlow::run()` | degraded → `rt.run_for`（escape hatch）；否则重算 `IrGraph::from_flow + normalize + stable_hash` 与产物键比对（不符抛 `invalid_argument`），再调产物的 `tianshu_flow_install(&rt, &flow)` 安装接线、`rt.run_sources` 驱动源 |
 | `Pipeline::validate(graph)` | P1：重复通道生产者 / 悬空输入 → `std::invalid_argument` |
 | `Pipeline::compile(flow, options)` | P4+P5：normalize → hash → 缓存查 → codegen → 系统编译器 → dlopen → `dlsym(tianshu_flow_install)`；要么 valid 要么 degraded，不出"无效且未降级"的中间态 |
@@ -117,7 +117,7 @@ flowchart LR
 | P2 optimize | 直通消除 + 常量通道传播 | ❌ 未落地，管线中无此阶段 |
 | P3 sla-plan | ADR-0029 分析器，判定写 `.conf` | ✅ 分析在 `FlowBuilder::build()` 内执行（不在本管线内），`IrGraph` 携带其报告，`export_conf()` 落盘判定与预算表 |
 | P4 codegen | 自包含 `.gen.cc`；D4：算子 lambda 内联进 dispatch | ✅ M-C 形态（ADR-0032，D4 修正为类型化宿主钩子）：`specialize` 钩子（host 模板实例化）+ 常量编排安装；逐消息快路径在 dsl 侧 `FastMap/FastJoin/FastSinkStage`（直连 CacheBuffer、单指针擦除、自持 seq、常量扇出） |
-| P5 emit+load | 编译、缓存、dlopen、工厂绑定 | 🟡 全量落地（含哈希守卫与 degraded 回退），但 `ti compile` CLI（D7 的 M-B 交付物）未实现 |
+| P5 emit+load | 编译、缓存、dlopen、工厂绑定 | ✅ 全量落地（含哈希守卫与 degraded 回退）；`ti-compile` CLI（D7 的 M-B 交付物）2026-09-18 落地 |
 
 ### 3.2 compile → 装载 → 运行（`pipeline.cc`）
 
@@ -184,7 +184,7 @@ extern "C" void tianshu_flow_install(tianshu::dsl::FlowRuntime* rt,
 - **dsl（上游与运行底座）**：IR 输入是 `dsl::Flow`（`sources()/maps()/joins()/ops()/statefuls()/spans()/froms()/sinks()/sla_endpoints()/sla_report()/wcet_by_out()/fallback_flow()`）；产物 install 复放的是 `dsl_runtime.h` 的 `wire()` 工厂（`make_map_wire` 等），degraded 回落 `FlowRuntime::run_for`。D8 的运行时优化（L1/L2 层）改的是 `dsl_runtime`，本模块是其验证装置的消费者。
 - **sla**：`IrGraph` 携带 `sla::SlaEndpoint` 矢量与 `sla::SlaReport`；`export_conf` 把 SLA 判定与预算表写进产物（ADR-0030 需求 6：P3 判定结果写 `.conf`）。
 - **base / core**：经 dsl 间接依赖（`SmallVec`、`DataDispatcher`、`Lineage`）；benchmark 直用 `base::CacheBuffer` + `core::DataDispatcher` 构造手写金标准。
-- **cli**：ADR-0030 D7 规划 `ti compile`（M-B 交付物）——**未实现**；`ti-launch` 当前装载的是 core 侧 INI `DagConfig` 组件图，与本管线无交集（M-D 的"ti launch 启动重放"是未来接线点）。
+- **cli**：ADR-0030 D7 的 M-B 交付物 `ti-compile` 已落地（离线 dry-run + 编译 + `.dag`/`.conf` 导出 + `--emit-source` 审计）；M-D 接线已落地——`ti-launch <flow名>` 按名 dry-run → 本管线编译 → 安装产物运行至信号（机制详见 [modules/cli.md](./cli.md) §3.4）。
 - **version**：`tianshu/version.h` 的 `tianshu_version_string()` 进缓存键。
 
 ## 5. 设计决策与被否方案（ADR 摘要）
@@ -193,7 +193,7 @@ extern "C" void tianshu_flow_install(tianshu::dsl::FlowRuntime* rt,
 |---|---|---|---|
 | 1 | **源码 codegen + 系统编译器成 `.so`** | LLVM JIT（ORC/Cranelift）：工具链体积与 ADR-0005 依赖治理冲突、产物不可人读（认证成本高）、`-O3` 已够零开销 | [ADR-0030 D1](../../adr/0030-l1-compiler.md) |
 | 2 | **声明图即 IR**，不另造中间表示 | 双表示（DSL 图 + 独立 IR）：pass 间契约分裂、同步成本；IR 是唯一 pass 间契约，pass 不触碰 DSL 类型 | D2 |
-| 3 | **六阶段 pass 管线**，v0 进程内一次执行 | 落盘中间产物的多趟编译：Phase 1 无必要；`ti compile` 离线形态留 M-B（CLI 未实现） | D3 |
+| 3 | **六阶段 pass 管线**，v0 进程内一次执行 | 落盘中间产物的多趟编译：Phase 1 无必要；`ti-compile` 离线形态已落地（复用同一管线与缓存，不引入第二套编译路径） | D3 |
 | 4 | **与手写逐符号对齐**（同一 `wire()`/dispatch API、同一内联头） | codegen 绕开 DataDispatcher 直写 transport：偏离等价基线，H1 逐字节一致难证 | D4 + 被否表 |
 | 5 | **三方对比装置**（手写为金标准） | 两方对比（产物 vs 解释执行）：解释执行仅回归参考，无金标准则 <1% 无从判 | D5 |
 | 6 | **escape hatch**：编译失败自动降级解释执行 + 白名单 flags + `.gen.cc` 可审计 | 编译失败即硬错：无编译器环境（mcu/沙箱）不可用；产物不可读则认证场景无法人审 | D6 |
@@ -208,6 +208,7 @@ extern "C" void tianshu_flow_install(tianshu::dsl::FlowRuntime* rt,
 - `tests/compiler/pipeline_test.cc`（4 用例，M-B 验收）：产物输出 = 解释执行输出 · 二次编译命中缓存 · 编译器缺失 degraded 但仍出全部输出 · 产物拒绝外来 flow（哈希守卫）。
 - `tests/dsl/specialize_test.cc`（9 用例，M-C H1 验收，ADR-0032）：五形状 / 多生产者 / 混合 op / SLA 回退 / 历史收窄 / 录制内容 / 回放——`wire_specialized` 与 `wire` 逐字节等价（值 + 血缘 describe 字节）。
 - `tests/compiler/pipeline_validation_test.cc`（5 用例，D6 降级路径）：悬空输入 / 重复生产者结构拒绝（经 `IrGraphTestPeer` 友元注入故障图——公共 IR 面刻意不可变）· 良形图通过 · strict 模式抛 `runtime_error` · `CompiledFlow` 移动语义全路径。
+- `tests/cli/ti_compile_test.cc`（7 用例，M-B CLI 面，TI_BIN_DIR 子进程 + provider `.so`）：成功产物落盘 / 缓存命中 / `--emit-source` / 未知 flow rc 1 / `--no-fallback` rc 1 与默认降级 rc 0 / `--list` / usage rc 2（条目详见 [modules/cli.md](./cli.md) §6）。
 - 基准：`benchmarks/codegen_vs_handwritten.cc`——5 链形 × 3 实现各 1M 条（fan-out 4M 样本），P50/P99/P99.9 counters；运行 `./build/desktop-release/bin/codegen_vs_handwritten --benchmark_min_time=1s`。**H2 判决数字必须按 §6.1 测量协议取**。
 - 示例：`examples/traceable_flow_demo.cc`（M-D：注册表枚举 → 按名 dry-run trace → SLA 报告 / artifact hash / fallback 阶梯打印 → 编译运行 → `fallback_state()`）。
 
@@ -253,6 +254,6 @@ taskset -pc 3 $!                                            # 再绑核（顺序
 
 **搬运问题最终修复：直槽就地访问（2026-09-18，2ff5b47）——五形状全部达到或反超手写**。剩余搬运根因 = 槽接口按值取放协议（map 弹出 + sink 弹出物化，每分支 2 次）；修复 = DirectSlot 暴露 `value()` 就地引用（ADR-0036 同栈纪律），map 回调**就地 add_hop**、sink 回调**就地传引用**，非直槽保留弹出路径，join 不变（inbox 弹出是配对语义）。预言 20→5-12，**实测 -10~-21（编译侧反超）**：就地后编译路径构造次数少于手写的"拷一次+移一次"。全形状快照（3 轮）：short -9~+19 / medium -39~-110 / long -110~-140 / fan-in -3417~-6063 / fan-out -10~-20。**H2 从 R1 的 +101~+460 全 FAIL 收敛到五形状 ≤0**（正式判决数字建议空闲窗取，方向已 13 轮一致）。血缘表示按裁定保留字符串（v1 ID 方案否决）。
 - **P1 分析面窄**：无类型一致性检查（IR 层类型已擦除为字符串）、环不被拒绝只被确定性排序——完整 analyze 语义待 M-C。
-- **`ti compile` CLI 缺位**：离线预编译（车端冷启动秒级首编译的主要缓解）只能经进程内 `Pipeline::compile` + 缓存目录复用间接达成。
-- **`.dag`/`.conf` 无消费方**：装载路径不读它们（守卫靠运行期重算哈希）；`ti launch` 接 dry-run 重放（M-D 收尾）后它们才成为装载输入。
+- **离线编译经 `ti-compile` CLI 达成**：车端冷启动秒级首编译的主要缓解——部署前 `ti-compile <flow>` 预热缓存目录，运行时 `Pipeline::compile` 直接命中（`cache: hit`）；profile 语义规划 `vehicle` 以上默认 AOT、`mcu` 永远 AOT（ADR-0030 风险节）。
+- **`.dag`/`.conf` 仍无装载消费方**：装载守卫靠运行期重算哈希（`CompiledFlow::run`），两者定位是审计/溯源产物；若未来装载改读它们（跨进程冷启动免重算），需在 ADR-0030 体系内增补装载语义。
 - **加载期编译时延**：首编译一条中链秒级（进程内 `c++` 调用）；profile 语义规划 `vehicle` 以上默认 AOT、`mcu` 永远 AOT（ADR-0030 风险节），依赖 `ti compile` 落地。

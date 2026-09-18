@@ -1,10 +1,10 @@
 # SLA 编译（`tianshu/sla`）
 
-> 状态：✅ 已实现 v0 + v0.5——加载期端到端 deadline 验证（两层分析 + 预算分配 + fail-fast）与运行期旁路直方图（miss 计数 / p50 / p99）均已落地；Phase 1 校准回路经 `ti-info --calibrate` 可用；固定优先级 RTA 与 fallback 热切换属 Phase 2（见 §7）
+> 状态：✅ 已实现 v0 + v0.5——加载期端到端 deadline 验证（两层分析 + 预算分配 + fail-fast）与运行期旁路直方图（miss 计数 / p50 / p99）均已落地；Phase 1 校准回路（`ti-info --calibrate --wcet` 漂移比对）已落地并经 H3 判定 PASS（2026-09-18，ADR-0038）；固定优先级 RTA 与 fallback 热切换属 Phase 2（见 §7）
 > 代码：`tianshu/include/tianshu/sla/{sla_analyzer.h, sla_stats.h}` · `tianshu/src/{sla_analyzer.cc, sla_stats.cc}`
-> 关键 ADR：[ADR-0029 SLA 编译 v0](../../adr/0029-sla-compilation.md)（D1–D7 全部决策） · [ADR-0031 降级阶梯](../../adr/0031-fallback-degradation.md)（消费 miss 计数器） · [ADR-0030 L1 编译器](../../adr/0030-l1-compiler.md)（P3 pass 的 v0 降维实现）
-> 测试：`tests/dsl/sla_test.cc`（10 用例，对应 ADR-0029 验收清单 1–6 + 运行期 7–10） · 示例：`examples/traceable_flow_demo.cc`
-> 最后同步：2026-09-10 · commit `c8ed440`
+> 关键 ADR：[ADR-0029 SLA 编译 v0](../../adr/0029-sla-compilation.md)（D1–D7 全部决策） · [ADR-0031 降级阶梯](../../adr/0031-fallback-degradation.md)（消费 miss 计数器） · [ADR-0030 L1 编译器](../../adr/0030-l1-compiler.md)（P3 pass 的 v0 降维实现） · [ADR-0038 H3 验证语义](../../adr/0038-h3-verification-semantics.md)（校准回路判定协议）
+> 测试：`tests/dsl/sla_test.cc`（11 用例，对应 ADR-0029 验收清单 1–6 + 运行期 7–10 + 回归 11） · 示例：`examples/traceable_flow_demo.cc` · H3 装置：`benchmarks/h3_wcet_rig.cc` + `tools/h3_shield.sh`
+> 最后同步：2026-09-18（H3 判定 PASS + --wcet 漂移比对；未提交，待维护者过目）
 
 ## 1. 职责与边界（做什么 / 明确不做什么）
 
@@ -22,7 +22,7 @@
 - **不做硬实时证明**：v0 执行现实是 CFS 上的线程级联（[ADR-0021](../../adr/0021-dsl-v0.md)），两层模型是诚实边界；固定优先级 RTA 是 Phase 2 静态调度落地后的升级项。
 - **不做运行时 SLA 执行/降级接管**：[ADR-0031](../../adr/0031-fallback-degradation.md) v0 只产生降级**信号**（watcher 采样 miss 计数器），热切换是 v1。
 - **无 SLA 声明零开销**：`FlowBuilder::run_sla_analysis` 在 `sla_endpoints_` 为空时直接返回；非 endpoint 通道的 `record_if_endpoint` 只付一次 map 查找。
-- **不做 WCET 测量**：声明优先（`with_wcet`），测量校准由 `ti-info --calibrate`（H3 回路）离线提供。
+- **不做 WCET 测量**：声明优先（`with_wcet`），测量校准由 `ti-info --calibrate`（H3 回路）离线提供，声明值与建议值的偏差比对经 `--wcet` 机器判定（ADR-0038 D4）。
 
 ## 2. 公共 API 速览
 
@@ -101,7 +101,7 @@ flowchart TD
     J -- "其余" --> L["ok = true，预算表随 Flow 携带"]
 ```
 
-- **迭代式 DFS 回溯**（`Backtracker`）：显式栈帧（channel / acc / node / next_input），从 endpoint 逆向走 producer 表。**每消费一条输入边收一次 hop cost**（D2）；遇到 join/span 汇聚分支全部展开，L 取 max。
+- **迭代式 DFS 回溯**（`Backtracker`）：显式栈帧（channel / acc / node / next_input），从 endpoint 逆向走 producer 表。**每消费一条输入边收一次 hop cost**（D2）；遇到 join/span 汇聚分支全部展开，L 取 max。每次 `worst_path()` 调用重置 best（跨端点状态隔离，回归 ⑪）——否则后分析的小 deadline 端点会继承前面端点的更大最坏路径而误报。
 - **环容忍**：`map_to` 写回使图含反馈边——输入通道已在当前 walk 上即终止该分支，环在每条路径至多计入一次（ADR-0029 D3 的保守 v0 立场）。
 - **默认 WCET 记账**：`wcet ≤ 0` 的节点取 `default_wcet` 并把 `"kind -> out_channel"` 去重记入 `default_wcet_notes`（验收 5）。
 - **预算分摊**：`proportional_share` 按声明 WCET 比例（整数截断可丢 1µs，测试以 ±1µs 容差锁定）；v0 不做 slack 分配优化，join 汇聚点取各分支预算的 **min**。
@@ -119,7 +119,7 @@ flowchart TD
 - **dsl（上游声明面）**：`FlowChain::with_sla(Sla)` / `with_wcet` / `FlowBuilder::with_sla_config` 是唯一用户入口；`FlowBuilder::run_sla_analysis`（`flow.h`）在 `build()` 内把 source/map/join/op/stateful/span/from 声明降维成矢量表调 `SlaAnalyzer`——from() 按 arity 拆：无输入 → `SlaSource`，一/二输入 → `SlaNode`；stateful 的**状态通道不参与**（数据路径携带时延契约，状态通道是恢复簿记，ADR-0027）。`Flow` 携带 `sla_report()` / `sla_endpoints()` / `wcet_by_out()`。
 - **dsl（运行期）**：`FlowRuntime::sla_snapshot()` 透出 collector 快照；`fallback_state()`（ADR-0031）消费 miss 计数器产生降级信号。
 - **compiler**：`IrGraph::from_flow` 携带 endpoints 与 SlaReport，`export_conf()` 输出 `sla_ok` / `[[sla]]` / `[[budget]]` / `fallback_flow`——SLA 判定进编译产物的 `.conf`（[ADR-0030](../../adr/0030-l1-compiler.md) D2/D6）。本模块是六阶段管线 P3（SLA 规划）的 v0 降维实现。
-- **cli**：`ti-info --calibrate`（H3 回路，ADR-0029 Phase 1 里程碑）从 record v2 的血缘 hop 提取每级实测 e2e（`ts(out) − ts(倒数第二跳)`），聚合 P50/P99/P99.9 并建议 `WCET = p99.9 × 1.3`，反填 `with_wcet` 声明。
+- **cli**：`ti-info --calibrate`（H3 回路，ADR-0029 Phase 1 里程碑）从 record v2 的血缘 hop 提取每级实测 e2e（`ts(out) − ts(倒数第二跳)`），聚合 P50/P99/P99.9 并建议 `WCET = p99.9 × 1.3`，反填 `with_wcet` 声明；`--wcet` 比对声明值与建议值（偏离 >3× → DRIFT-HIGH/LOW，rc 3，ADR-0038 D4）。
 - **record v2**（ADR-0028）：校准回路的数据源；声明值与实测偏差 >3× 即漂移信号。
 - **依赖方向**：sla 只依赖 C++ 标准库，不 include 任何其它 `tianshu::` 模块（dsl / compiler 单向依赖它）。
 
@@ -137,14 +137,14 @@ flowchart TD
 
 ## 6. 测试 / 基准 / 示例入口
 
-- `tests/dsl/sla_test.cc`（10 用例，全部通过）：①满足链路预算比例 ②超限抛错含路径与 worst offender ③join 取关键分支、汇聚预算 min ④饱和度 WARNING/strict ERROR ⑤默认 WCET 告警 ⑥无声明不分析 ⑦–⑧运行期直方图与 miss 计数 ⑨collector 桶下界/miss/非 endpoint no-op ⑩无 endpoint 快照为空。
+- `tests/dsl/sla_test.cc`（11 用例，全部通过）：①满足链路预算比例 ②超限抛错含路径与 worst offender ③join 取关键分支、汇聚预算 min ④饱和度 WARNING/strict ERROR ⑤默认 WCET 告警 ⑥无声明不分析 ⑦–⑧运行期直方图与 miss 计数 ⑨collector 桶下界/miss/非 endpoint no-op ⑩无 endpoint 快照为空 ⑪跨端点最坏路径隔离（回归：`worst_path()` 每端点重置 best，红证过）。
 - `examples/traceable_flow_demo.cc`：`with_sla(deadline 20ms)` + `with_fallback("demo_traceable_lite")` 同屏演示——dry-run 打印 `flow.sla_report().format()`，编译运行后查询 `runtime.fallback_state()`。
 - 校准入口：`ti info <file.trec> --calibrate`（见 [cli.md](./cli.md) §2）。
-- 基准：无专属基准（分析在加载期一次性执行，不进热路径；运行期旁路的成本由"非 endpoint 一次查找"契约界定）。
+- 基准：`benchmarks/h3_wcet_rig.cc`（H3 验证装置，三分支七 stage，ADR-0038）——分析本身在加载期一次性执行，不进热路径；运行期旁路的成本由"非 endpoint 一次查找"契约界定）。
 
 ## 7. 已知限制与演进方向
 
-- **hop cost 与默认 WCET 是保守常数**：校准回路闭环前，分析结论是"工程准入"而非"证明"——文档措辞保持这个诚实边界（ADR-0029 风险节）。`ti-info --calibrate` 已可产出建议值，**反填告警**（声明偏差 >3× 提示）尚未自动化。
+- **hop cost 与默认 WCET 是保守常数**：分析结论是"工程准入"而非"证明"——文档措辞保持这个诚实边界（ADR-0029 风险节）。校准回路已闭环并经 H3 判定 PASS（2026-09-18，[ADR-0038](../../adr/0038-h3-verification-semantics.md)：两轮预测力协议，7 stage 全 PASS，ε ≤ 9.80%）；声明偏离建议值 >3× 的告警经 `ti-info --wcet` 机器判定（DRIFT-HIGH/LOW，rc 3）。
 - **`from()` 共享算子的 WCET 按路径重复计入**（保守），Phase 1 重审分摊（ADR-0029 开放问题）。
 - **`machine_cores` 不感知容器/隔离核**：Phase 2 接 OSAL 拓扑查询。
 - **Phase 2 升级路径**（已写进 ADR、不在 v0 代码）：L1 静态调度 + 固定优先级 RTA（`R_i = C_i + Σ⌈R_i/T_j⌉C_j`）之后才有硬 RT 语义；层 2 届时升级。

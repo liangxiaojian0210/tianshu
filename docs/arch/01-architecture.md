@@ -72,7 +72,7 @@ flowchart TB
 | 传输层 | `tianshu/transport/` + `tianshu/shm/` | ✅* | INTRA + SHM 跨进程 + kAuto 自动选路（*跨机 Zenoh 未实现，ADR-0013） | [modules/transport.md](./modules/transport.md) |
 | 声明式 DSL 与血缘 | `tianshu/dsl/` | ✅ | flow 声明、解释执行、切片输入、状态即数据、record v1/v2、fallback 降级阶梯 | [modules/dsl.md](./modules/dsl.md) |
 | SLA 编译 | `tianshu/sla/` | ✅ | 加载期 deadline 验证 + 预算下行分摊 | [modules/sla.md](./modules/sla.md) |
-| L1 编译器 | `tianshu/compiler/` | 🟡 | 声明图 → 优化 → 源码 codegen → `.so`（Phase 1 H2 主战场） | [modules/compiler.md](./modules/compiler.md) |
+| L1 编译器 | `tianshu/compiler/` | 🟡 | 声明图 → 优化 → 源码 codegen → `.so`（Phase 1 H2 验证项） | [modules/compiler.md](./modules/compiler.md) |
 | ti CLI 家族 | `tianshu/cli/` | ✅ | ti / ti-launch（DAG 装载）/ ti-monitor（通道观测）/ ti-info | [modules/cli.md](./modules/cli.md) |
 
 **验证/示例资产**：`tests/`（按模块镜像：base/sched/core/transport/shm/dsl/compiler）、`benchmarks/`（object_pool / shm_transport / lineage / codegen_vs_handwritten）、`examples/`（dsl_demo → lidar_imu → full_chain → record_replay → state_recovery，难度递进；叙事讲解见 [03](../03-full-chain-demo.md)/[04](../04-data-model-generalization.md)/[05](../05-dsl-getting-started.md)）。
