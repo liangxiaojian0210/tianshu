@@ -53,6 +53,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 Phase 1 PoC — in progress.
 
+### Gold-standard concurrency equivalence for fan-in (ADR-0037)
+
+- Ruling 2026-09-17: "the comparison premise is equivalence" — the DSL
+  declares one thread per source (ADR-0021), so all three fan-in
+  implementations now drive with one thread per source, and the
+  handwritten join pays real synchronization (per-join std::mutex,
+  pending-root hand-off under the lock fixing a stale-root window,
+  fixed lock order j1 -> j2 -> sink; both sides guard the sink
+  capture). Linear and fan-out shapes are single-source and unchanged.
+- Measured: p50 REVERSES to compiled leading — shielded compiled
+  371 ns vs gold 4338 ns (11.7x: contended std::mutex futex
+  sleep/wake collapse vs the never-sleeping atomic-inbox +
+  single-flight design); unshielded 912 vs 1222, same direction.
+  fan-in carries no excess overhead anymore — the framework's join
+  machinery is a net advantage over reasonable handwritten
+  synchronization. Threaded-shape p99/p999 under the 2-logical-CPU
+  shield are scheduler-dominated (~3.3 ms tails, identical across
+  implementations); p50 is the implementation signal for threaded
+  shapes.
+
 ### Direct single-writer lineage slots for linear channels (ADR-0036)
 
 - detail::DirectSlot: a plain-member single slot (no ring, no atomics,

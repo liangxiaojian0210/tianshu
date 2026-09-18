@@ -202,6 +202,15 @@ class HandChain {
 // (the buffer is non-empty then) and messages wait in slots, never
 // re-queued. Lineage mirrors the DSL join: pop both input branches
 // (a then b), merge, then one hop on the output channel.
+//
+// Concurrency equivalence (2026-09-17 ruling: the comparison premise is
+// equivalence): the DSL declares one thread per source (ADR-0021), so the
+// handwritten rig must pay real synchronization too. Each join state
+// transition runs under a std::mutex; roots are handed over through
+// pending slots under the same lock (the root and the message are staged
+// separately, so an unlocked window would let a concurrent pairing
+// consume a stale root). Lock order is j1 -> j2 (a join's dispatch fires
+// downstream joins synchronously); no path takes them in reverse.
 struct HandJoin {
   CacheBuffer<BenchMsg> in_a{16};
   CacheBuffer<BenchMsg> in_b{16};
@@ -209,90 +218,128 @@ struct HandJoin {
   std::optional<BenchMsg> slot_b;
   Lineage lin_a;
   Lineage lin_b;
-  Lineage out_slot;
+  Lineage pending_a;
+  Lineage pending_b;
+  const std::string* out_ch{nullptr};
   std::uint64_t out_seq{0};
+  std::mutex mutex;
 
-  void step_a(std::uint64_t next, Lineage* dst_slot, const std::string* out_ch) {
+  void stage_root_a(Lineage root) {
+    const std::scoped_lock lock(mutex);
+    pending_a = std::move(root);
+  }
+
+  void stage_root_b(Lineage root) {
+    const std::scoped_lock lock(mutex);
+    pending_b = std::move(root);
+  }
+
+  template <typename Emit>
+  void step_a(Emit&& emit) {
+    const std::scoped_lock lock(mutex);
     while (const BenchMsg* p = in_a.try_fetch()) {
       slot_a = *p;
-      try_emit(next, dst_slot, out_ch);
+      lin_a = std::move(pending_a);
+      pair_check(emit);
     }
   }
 
-  void step_b(std::uint64_t next, Lineage* dst_slot, const std::string* out_ch) {
+  template <typename Emit>
+  void step_b(Emit&& emit) {
+    const std::scoped_lock lock(mutex);
     while (const BenchMsg* p = in_b.try_fetch()) {
       slot_b = *p;
-      try_emit(next, dst_slot, out_ch);
+      lin_b = std::move(pending_b);
+      pair_check(emit);
     }
   }
 
-  void try_emit(std::uint64_t next, Lineage* dst_slot, const std::string* out_ch) {
+  template <typename Emit>
+  void pair_check(Emit&& emit) {
     if (!slot_a.has_value() || !slot_b.has_value()) {
       return;
     }
-    const BenchMsg out = fuse(*slot_a, *slot_b);
+    BenchMsg out = fuse(*slot_a, *slot_b);
     Lineage merged = std::move(lin_a);
     merged.merge(lin_b);
     merged.add_hop({.channel = *out_ch, .seq = ++out_seq});
-    if (dst_slot != nullptr) {
-      *dst_slot = std::move(merged);
-    }
     slot_a.reset();
     slot_b.reset();
-    DataDispatcher::instance().dispatch(next, &out, sizeof(out));
+    emit(std::move(out), std::move(merged));
   }
 };
 
-// Handwritten fan-in: J1(A,B) -> J2(J1,C) -> sink.
+// Fan-in sink capture: the fused output can fire from any producer
+// thread, so the latency vector append is guarded (both sides pay this).
+struct FanInSink {
+  explicit FanInSink(std::vector<std::uint64_t>* lats) : latencies(lats) {}
+
+  void record(std::uint64_t lat) {
+    const std::scoped_lock lock(mutex);
+    latencies->push_back(lat);
+  }
+
+  std::mutex mutex;
+  std::vector<std::uint64_t>* latencies;
+};
+
+// Handwritten fan-in: J1(A,B) -> J2(J1,C) -> sink, driven with one
+// thread per source — the declared semantics (ADR-0021; equivalence
+// ruling 2026-09-17). Emit callbacks run under the emitting join's
+// lock; the j1 -> j2 root hand-off and downstream dispatch therefore
+// follow the fixed lock order j1 -> j2 -> sink.
 class HandFanIn {
  public:
-  HandFanIn(const std::string& prefix, std::vector<std::uint64_t>* sink_latencies)
-      : sink_latencies_(*sink_latencies), owner_(this) {
+  HandFanIn(const std::string& prefix, FanInSink* sink) : sink_(*sink), owner_(this) {
     auto& dispatcher = DataDispatcher::instance();
-    const std::uint64_t j1_id = tianshu::core::channel_id_for(prefix + "/j1");
-    const std::uint64_t out_id = tianshu::core::channel_id_for(prefix + "/out");
+    j1_id_ = tianshu::core::channel_id_for(prefix + "/j1");
+    out_id_ = tianshu::core::channel_id_for(prefix + "/out");
     j1_out_ch_ = prefix + "/j1";
     out_ch_ = prefix + "/out";
-    dispatcher.add_buffer(tianshu::core::channel_id_for(prefix + "/a"), &j1_.in_a,
-                          [this, j1_id] { j1_.step_a(j1_id, &j2_.lin_a, &j1_out_ch_); }, owner_);
-    dispatcher.add_buffer(tianshu::core::channel_id_for(prefix + "/b"), &j1_.in_b,
-                          [this, j1_id] { j1_.step_b(j1_id, &j2_.lin_a, &j1_out_ch_); }, owner_);
-    dispatcher.add_buffer(j1_id, &j2_.in_a, [this, out_id] { j2_.step_a(out_id, nullptr, &out_ch_); },
-                          owner_);
-    dispatcher.add_buffer(tianshu::core::channel_id_for(prefix + "/c"), &j2_.in_b,
-                          [this, out_id] { j2_.step_b(out_id, &sink_lin_, &out_ch_); }, owner_);
-    dispatcher.add_buffer(out_id, &sink_buf_,
-                          [this] {
-                            while (const BenchMsg* msg = sink_buf_.try_fetch()) {
-                              const Lineage& received = sink_lin_;
-                              static_cast<void>(received);
-                              sink_latencies_.push_back(now_ns() - msg->born_ns);
-                            }
-                          },
-                          owner_);
+    j1_.out_ch = &j1_out_ch_;
+    j2_.out_ch = &out_ch_;
+    a_id_ = tianshu::core::channel_id_for(prefix + "/a");
+    b_id_ = tianshu::core::channel_id_for(prefix + "/b");
+    c_id_ = tianshu::core::channel_id_for(prefix + "/c");
     ch_a_ = prefix + "/a";
     ch_b_ = prefix + "/b";
     ch_c_ = prefix + "/c";
+    const auto j1_emit = [this](BenchMsg out, Lineage merged) {
+      j2_.stage_root_a(std::move(merged));
+      DataDispatcher::instance().dispatch(j1_id_, &out, sizeof(out));
+    };
+    const auto j2_emit = [this](BenchMsg out, const Lineage& /*merged*/) {
+      DataDispatcher::instance().dispatch(out_id_, &out, sizeof(out));
+    };
+    dispatcher.add_buffer(a_id_, &j1_.in_a, [this, j1_emit] { j1_.step_a(j1_emit); }, owner_);
+    dispatcher.add_buffer(b_id_, &j1_.in_b, [this, j1_emit] { j1_.step_b(j1_emit); }, owner_);
+    dispatcher.add_buffer(j1_id_, &j2_.in_a, [this, j2_emit] { j2_.step_a(j2_emit); }, owner_);
+    dispatcher.add_buffer(c_id_, &j2_.in_b, [this, j2_emit] { j2_.step_b(j2_emit); }, owner_);
+    dispatcher.add_buffer(out_id_, &sink_buf_,
+                          [this] {
+                            while (const BenchMsg* msg = sink_buf_.try_fetch()) {
+                              sink_.record(now_ns() - msg->born_ns);
+                            }
+                          },
+                          owner_);
   }
 
   ~HandFanIn() { DataDispatcher::instance().remove_owner(owner_); }
 
   void drive(std::size_t messages) {
-    const std::uint64_t a = tianshu::core::channel_id_for(ch_a_);
-    const std::uint64_t b = tianshu::core::channel_id_for(ch_b_);
-    const std::uint64_t c = tianshu::core::channel_id_for(ch_c_);
-    for (std::size_t i = 0; i < messages; ++i) {
-      const std::uint64_t born = now_ns();
-      const auto seq = static_cast<std::uint64_t>(i);
-      const BenchMsg ma{.born_ns = born, .seq = seq};
-      const BenchMsg mb{.born_ns = born, .seq = seq};
-      const BenchMsg mc{.born_ns = born, .seq = seq};
-      j1_.lin_a = Lineage::rooted(ch_a_, seq);
-      j1_.lin_b = Lineage::rooted(ch_b_, seq);
-      j2_.lin_b = Lineage::rooted(ch_c_, seq);
-      DataDispatcher::instance().dispatch(a, &ma, sizeof(ma));
-      DataDispatcher::instance().dispatch(b, &mb, sizeof(mb));
-      DataDispatcher::instance().dispatch(c, &mc, sizeof(mc));
+    const auto loop = [](const std::string& ch, std::uint64_t id, auto&& stage, std::size_t n) {
+      for (std::size_t i = 0; i < n; ++i) {
+        const BenchMsg msg{.born_ns = now_ns(), .seq = static_cast<std::uint64_t>(i)};
+        stage(Lineage::rooted(ch, static_cast<std::uint64_t>(i)));
+        DataDispatcher::instance().dispatch(id, &msg, sizeof(msg));
+      }
+    };
+    std::vector<std::thread> sources;
+    sources.emplace_back([&] { loop(ch_a_, a_id_, [this](Lineage r) { j1_.stage_root_a(std::move(r)); }, messages); });
+    sources.emplace_back([&] { loop(ch_b_, b_id_, [this](Lineage r) { j1_.stage_root_b(std::move(r)); }, messages); });
+    sources.emplace_back([&] { loop(ch_c_, c_id_, [this](Lineage r) { j2_.stage_root_b(std::move(r)); }, messages); });
+    for (auto& thread : sources) {
+      thread.join();
     }
   }
 
@@ -302,11 +349,15 @@ class HandFanIn {
   std::string ch_c_;
   std::string j1_out_ch_;
   std::string out_ch_;
+  std::uint64_t j1_id_{0};
+  std::uint64_t out_id_{0};
+  std::uint64_t a_id_{0};
+  std::uint64_t b_id_{0};
+  std::uint64_t c_id_{0};
   HandJoin j1_;
   HandJoin j2_;
   CacheBuffer<BenchMsg> sink_buf_{16};
-  Lineage sink_lin_;
-  std::vector<std::uint64_t>& sink_latencies_;
+  FanInSink& sink_;
   const void* owner_;
 };
 
@@ -408,8 +459,7 @@ void drive_runtime(tianshu::dsl::FlowRuntime& rt, const tianshu::dsl::Flow& flow
   }
 }
 
-tianshu::dsl::Flow make_fanin_flow(const std::string& name,
-                                   std::vector<std::uint64_t>* sink_latencies) {
+tianshu::dsl::Flow make_fanin_flow(const std::string& name, FanInSink* sink) {
   tianshu::dsl::FlowBuilder b(name);
   const auto emit = [](std::uint64_t t) { return BenchMsg{.born_ns = 0, .seq = t}; };
   auto sa = b.source<BenchMsg>("a", std::chrono::milliseconds(1), emit);
@@ -417,9 +467,7 @@ tianshu::dsl::Flow make_fanin_flow(const std::string& name,
   auto sc = b.source<BenchMsg>("c", std::chrono::milliseconds(1), emit);
   auto j1 = b.join<BenchMsg, BenchMsg, BenchMsg>(sa, sb, fuse);
   auto j2 = b.join<BenchMsg, BenchMsg, BenchMsg>(j1, sc, fuse);
-  j2.sink([sink_latencies](const BenchMsg& msg, const Lineage&) {
-    sink_latencies->push_back(now_ns() - msg.born_ns);
-  });
+  j2.sink([sink](const BenchMsg& msg, const Lineage&) { sink->record(now_ns() - msg.born_ns); });
   return b.build();
 }
 
@@ -438,48 +486,42 @@ tianshu::dsl::Flow make_fanout_flow(const std::string& name,
   return b.build();
 }
 
-// Publish-only drive (compiled artifacts install their own wiring via run(),
-// so wire() must not run twice).
-void publish_fanin(tianshu::dsl::FlowRuntime& rt, const tianshu::dsl::Flow& flow, int messages) {
-  const auto& sources = flow.sources();
-  const std::string& ch_a = sources[0].channel;
-  const std::string& ch_b = sources[1].channel;
-  const std::string& ch_c = sources[2].channel;
-  for (int i = 0; i < messages; ++i) {
-    const std::uint64_t born = now_ns();
-    const auto seq = static_cast<std::uint64_t>(i);
-    const BenchMsg ma{.born_ns = born, .seq = seq};
-    const BenchMsg mb{.born_ns = born, .seq = seq};
-    const BenchMsg mc{.born_ns = born, .seq = seq};
-    rt.publish_bytes(ch_a, &ma, sizeof(ma), Lineage::rooted(ch_a, seq));
-    rt.publish_bytes(ch_b, &mb, sizeof(mb), Lineage::rooted(ch_b, seq));
-    rt.publish_bytes(ch_c, &mc, sizeof(mc), Lineage::rooted(ch_c, seq));
-  }
-}
-
-// Publish-only drive via typed source entries (ADR-0033): the compiled
-// artifact installs its own wiring via run(), and the drive loop enters
-// through the artifact-era entry (constant fan-out, no generic publish
-// segment) — the driver-role mirror of the handwritten rig's direct
-// dispatch calls.
-void publish_entries_fanin(tianshu::dsl::FlowRuntime& rt, const tianshu::dsl::Flow& flow,
-                           int messages) {
-  const auto& sources = flow.sources();
-  SourceEntry entry_a(rt, flow, sources[0].channel);
-  SourceEntry entry_b(rt, flow, sources[1].channel);
-  SourceEntry entry_c(rt, flow, sources[2].channel);
-  for (int i = 0; i < messages; ++i) {
-    const std::uint64_t born = now_ns();
-    const auto seq = static_cast<std::uint64_t>(i);
-    entry_a.publish(BenchMsg{.born_ns = born, .seq = seq}, seq);
-    entry_b.publish(BenchMsg{.born_ns = born, .seq = seq}, seq);
-    entry_c.publish(BenchMsg{.born_ns = born, .seq = seq}, seq);
-  }
-}
-
+// Fan-in drives run one thread per source (declared semantics,
+// ADR-0021; equivalence ruling 2026-09-17) on every implementation.
 void drive_fanin(tianshu::dsl::FlowRuntime& rt, const tianshu::dsl::Flow& flow, int messages) {
   rt.wire(flow);
-  publish_fanin(rt, flow, messages);
+  std::vector<std::thread> sources;
+  for (const auto& source : flow.sources()) {
+    sources.emplace_back([&rt, channel = source.channel, messages] {
+      for (int i = 0; i < messages; ++i) {
+        const auto seq = static_cast<std::uint64_t>(i);
+        const BenchMsg msg{.born_ns = now_ns(), .seq = seq};
+        rt.publish_bytes(channel, &msg, sizeof(msg), Lineage::rooted(channel, seq));
+      }
+    });
+  }
+  for (auto& thread : sources) {
+    thread.join();
+  }
+}
+
+// Compiled fan-in drive: typed source entries (ADR-0033), one thread per
+// source — the driver-role mirror of the handwritten rig.
+void publish_entries_fanin(tianshu::dsl::FlowRuntime& rt, const tianshu::dsl::Flow& flow,
+                           int messages) {
+  std::vector<std::thread> sources;
+  for (const auto& source : flow.sources()) {
+    sources.emplace_back([&rt, &flow, channel = source.channel, messages] {
+      SourceEntry entry(rt, flow, channel);
+      for (int i = 0; i < messages; ++i) {
+        const auto seq = static_cast<std::uint64_t>(i);
+        entry.publish(BenchMsg{.born_ns = now_ns(), .seq = seq}, seq);
+      }
+    });
+  }
+  for (auto& thread : sources) {
+    thread.join();
+  }
 }
 
 }  // namespace
@@ -534,7 +576,8 @@ void run_handwritten_fanin(benchmark::State& state) {
   for (auto _ : state) {
     std::vector<std::uint64_t> latencies;
     latencies.reserve(kMessages);
-    HandFanIn fanin("hwfi", &latencies);
+    FanInSink sink(&latencies);
+    HandFanIn fanin("hwfi", &sink);
     fanin.drive(kMessages);
     report_percentiles(state, latencies, 2);
   }
@@ -544,7 +587,8 @@ void run_interpreted_fanin(benchmark::State& state) {
   for (auto _ : state) {
     std::vector<std::uint64_t> latencies;
     latencies.reserve(kMessages);
-    auto flow = make_fanin_flow("itpfi", &latencies);
+    FanInSink sink(&latencies);
+    auto flow = make_fanin_flow("itpfi", &sink);
     tianshu::dsl::FlowRuntime rt;
     drive_fanin(rt, flow, kMessages);
     report_percentiles(state, latencies, 2);
@@ -555,7 +599,8 @@ void run_compiled_fanin(benchmark::State& state) {
   for (auto _ : state) {
     std::vector<std::uint64_t> latencies;
     latencies.reserve(kMessages);
-    auto flow = make_fanin_flow("cmpfi", &latencies);
+    FanInSink sink(&latencies);
+    auto flow = make_fanin_flow("cmpfi", &sink);
     tianshu::compiler::CompileOptions opts;
     opts.cache_dir = "/tmp/tianshu-h2-cache";
     auto compiled = tianshu::compiler::Pipeline::compile(flow, opts);
