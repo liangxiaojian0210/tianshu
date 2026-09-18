@@ -53,6 +53,28 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 Phase 1 PoC — in progress.
 
+### Typed slot refs for fast stages (ADR-0036 follow-up) + VERSION 0.1.2
+
+- Fast map/join/sink stages now pop their input lineage through a
+  detail::SlotRef carrying the typed fast pointer (DirectSlot* /
+  LineageInbox*, both final classes, so the call inlines) alongside the
+  virtual interface pointer (locked-queue kinds keep the virtual pop).
+  register_specialized_slot builds the SlotRef at creation — the typed
+  pointer is set by construction, no downcasts. Motivation: the fan-out
+  residual (+40 ns, 10/10 rounds identical in a quiet window) is real
+  extra instructions (~2.8k/msg measured) with the virtual slot
+  interface as the identified compiled-side-only component.
+- VERSION bumped to 0.1.2 (runtime semantic change invalidates cached
+  artifacts per the artifact contract); version.h macros gained #ifndef
+  guards so the CMake-injected definitions no longer collide with the
+  header fallbacks (-Werror redefined, second occurrence of that trap).
+- Full suite green (339 ctest + 33 bazel, cold-cache pipeline included).
+  Effect verification deferred to a quiet measurement window: under
+  background load (~6.6) BOTH sides inflate ~2.2x and the same-round
+  diff itself drifts 40 -> 61-89, violating the round-identity
+  validity criterion; the quiet-window baseline is diff=40 exactly
+  (prediction for this change: 28-34).
+
 ### Gold-standard concurrency equivalence for fan-in (ADR-0037)
 
 - Ruling 2026-09-17: "the comparison premise is equivalence" — the DSL

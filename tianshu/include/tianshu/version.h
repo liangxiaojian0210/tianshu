@@ -19,11 +19,22 @@
 #include <cstdint>
 
 // Version macros (compile-time usable in static_assert / preprocessor).
+// Guarded: the build system injects the same macros from the VERSION
+// file (single source of truth, cache-invalidation per the artifact
+// contract) — the fallbacks here keep the header usable standalone.
 // NOLINTBEGIN(modernize-macro-to-enum): must be macros for C preprocessor.
+#ifndef TIANSHU_VERSION_MAJOR
 #define TIANSHU_VERSION_MAJOR 0
+#endif
+#ifndef TIANSHU_VERSION_MINOR
 #define TIANSHU_VERSION_MINOR 1
-#define TIANSHU_VERSION_PATCH 1
-#define TIANSHU_VERSION_STRING "0.1.1"
+#endif
+#ifndef TIANSHU_VERSION_PATCH
+#define TIANSHU_VERSION_PATCH 2
+#endif
+#ifndef TIANSHU_VERSION_STRING
+#define TIANSHU_VERSION_STRING "0.1.2"
+#endif
 // NOLINTEND(modernize-macro-to-enum)
 
 // Compile-time profile (set via build system, per ADR-0005).

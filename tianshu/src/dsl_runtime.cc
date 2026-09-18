@@ -362,26 +362,34 @@ std::shared_ptr<detail::LineageQueue> FlowRuntime::register_lineage_queue(
   return lineage_queue;
 }
 
-detail::LineageChannel* FlowRuntime::register_specialized_slot(const std::string& channel,
-                                                               LineageSlotKind kind) {
+detail::SlotRef FlowRuntime::register_specialized_slot(const std::string& channel,
+                                                       LineageSlotKind kind) {
   std::unique_ptr<detail::LineageChannel> slot;
+  detail::SlotRef ref;
   switch (kind) {
     case LineageSlotKind::kLockedQueue:
       slot = std::make_unique<detail::LineageQueue>(kQueueDepth * 2);
       break;
-    case LineageSlotKind::kAtomicInbox:
-      slot = std::make_unique<detail::LineageInbox>(kQueueDepth * 2);
+    case LineageSlotKind::kAtomicInbox: {
+      auto inbox = std::make_unique<detail::LineageInbox>(kQueueDepth * 2);
+      ref.inbox = inbox.get();
+      slot = std::move(inbox);
       break;
-    case LineageSlotKind::kDirectSlot:
-      slot = std::make_unique<detail::DirectSlot>();
+    }
+    case LineageSlotKind::kDirectSlot: {
+      auto direct = std::make_unique<detail::DirectSlot>();
+      ref.direct = direct.get();
+      slot = std::move(direct);
       break;
+    }
   }
+  ref.any = slot.get();
   const std::scoped_lock lock(mutex_);
   pub_ctx_ = std::make_shared<const std::unordered_map<std::string, std::shared_ptr<PublishCtx>>>();
   ++ctx_epoch_;
   channel_queues_[channel].push_back(slot.get());
   owned_slots_.push_back(std::move(slot));
-  return owned_slots_.back().get();
+  return ref;
 }
 
 FlowRuntime::~FlowRuntime() {

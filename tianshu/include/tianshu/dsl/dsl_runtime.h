@@ -296,6 +296,24 @@ class DirectSlot final : public LineageChannel {
   core::Lineage value_;
 };
 
+// Typed slot access for fast stages: the generic interface plus the
+// typed fast pointer (non-null when the plan installed that slot kind).
+// DirectSlot and LineageInbox are final, so their pop() inlines through
+// the typed pointer (ADR-0036 follow-up); the virtual interface remains
+// for the locked-queue kind.
+struct SlotRef {
+  LineageChannel* any{nullptr};
+  DirectSlot* direct{nullptr};
+  LineageInbox* inbox{nullptr};
+
+  [[nodiscard]] core::Lineage pop() const {
+    if (direct != nullptr) {
+      return direct->pop();
+    }
+    return inbox != nullptr ? inbox->pop() : any->pop();
+  }
+};
+
 }  // namespace detail
 
 class FlowRuntime {
@@ -632,10 +650,12 @@ class FlowRuntime {
   // register_lineage_queue so the slot kind follows the plan: linear
   // map/sink consumers get the direct single-slot (ADR-0036, same-stack
   // push/pop), join inputs keep the atomic inbox (cross-thread
-  // pairing), everything else keeps the locked queue.
+  // pairing), everything else keeps the locked queue. The returned
+  // SlotRef carries the typed fast pointer alongside the interface
+  // pointer, so fast stages pop() through the final class (inlinable).
   enum class LineageSlotKind : std::uint8_t { kLockedQueue, kAtomicInbox, kDirectSlot };
-  detail::LineageChannel* register_specialized_slot(const std::string& channel,
-                                                    LineageSlotKind kind);
+  [[nodiscard]] detail::SlotRef register_specialized_slot(const std::string& channel,
+                                                          LineageSlotKind kind);
 
   // Creates a lineage_queue owned by the runtime and registers it for
   // `channel` so publish_bytes fans lineage copies to it.
@@ -795,14 +815,14 @@ template <typename TIn, typename TOut, typename F>
 class FastMapStage final : public StageHolder, public FastStageBase {
  public:
   FastMapStage(FlowRuntime& rt, const std::string& in_channel, std::string out_channel, F fn,
-               LineageChannel* slot, std::size_t depth)
+               SlotRef slot, std::size_t depth)
       : rt_(rt), out_channel_(std::move(out_channel)), slot_(slot), fn_(std::move(fn)) {
     buffer_ = std::make_unique<base::CacheBuffer<TIn>>(depth);
     core::DataDispatcher::instance().add_buffer(
         core::channel_id_for(in_channel), buffer_.get(),
         [this] {
           while (TIn* msg = buffer_->try_fetch()) {
-            core::Lineage parent = slot_->pop();
+            core::Lineage parent = slot_.pop();
             TOut out = fn_(*msg);
             fan(std::move(parent), &out, sizeof(TOut));
           }
@@ -841,7 +861,7 @@ class FastMapStage final : public StageHolder, public FastStageBase {
 
   FlowRuntime& rt_;
   std::string out_channel_;
-  LineageChannel* slot_;
+  SlotRef slot_;
   F fn_;
   std::unique_ptr<base::CacheBuffer<TIn>> buffer_;
   core::ChannelId out_id_{0};
@@ -862,8 +882,7 @@ template <typename TA, typename TB, typename TC, typename F>
 class FastJoinStage final : public StageHolder, public FastStageBase {
  public:
   FastJoinStage(FlowRuntime& rt, const std::string& in_a, const std::string& in_b,
-                std::string out_channel, F fn, LineageChannel* slot_a, LineageChannel* slot_b,
-                std::size_t depth)
+                std::string out_channel, F fn, SlotRef slot_a, SlotRef slot_b, std::size_t depth)
       : rt_(rt),
         out_channel_(std::move(out_channel)),
         slot_a_(slot_a),
@@ -883,8 +902,8 @@ class FastJoinStage final : public StageHolder, public FastStageBase {
         if (b == nullptr) {
           break;
         }
-        core::Lineage merged = slot_a_->pop();
-        merged.merge(slot_b_->pop());
+        core::Lineage merged = slot_a_.pop();
+        merged.merge(slot_b_.pop());
         TC out = fn_(*a, *b);
         fan(std::move(merged), &out, sizeof(TC));
       }
@@ -924,8 +943,8 @@ class FastJoinStage final : public StageHolder, public FastStageBase {
 
   FlowRuntime& rt_;
   std::string out_channel_;
-  LineageChannel* slot_a_;
-  LineageChannel* slot_b_;
+  SlotRef slot_a_;
+  SlotRef slot_b_;
   F fn_;
   std::unique_ptr<core::DataVisitor<TA, TB>> visitor_;
   core::ChannelId out_id_{0};
@@ -941,14 +960,14 @@ class FastJoinStage final : public StageHolder, public FastStageBase {
 template <typename T, typename F>
 class FastSinkStage final : public StageHolder {
  public:
-  FastSinkStage(const std::string& channel, F fn, LineageChannel* slot, std::size_t depth)
+  FastSinkStage(const std::string& channel, F fn, SlotRef slot, std::size_t depth)
       : slot_(slot), fn_(std::move(fn)) {
     buffer_ = std::make_unique<base::CacheBuffer<T>>(depth);
     core::DataDispatcher::instance().add_buffer(
         core::channel_id_for(channel), buffer_.get(),
         [this] {
           while (T* msg = buffer_->try_fetch()) {
-            fn_(*msg, slot_->pop());
+            fn_(*msg, slot_.pop());
           }
         },
         this);
@@ -957,7 +976,7 @@ class FastSinkStage final : public StageHolder {
   [[nodiscard]] const void* dispatcher_owner() const override { return this; }
 
  private:
-  LineageChannel* slot_;
+  SlotRef slot_;
   F fn_;
   std::unique_ptr<base::CacheBuffer<T>> buffer_;
 };
@@ -984,9 +1003,10 @@ class SpecializeBuilder {
       rt_.attach_map<TIn, TOut>(in_channel, out_channel, std::move(fn));
       return;
     }
-    auto* slot = rt_.register_specialized_slot(in_channel, linear_slot(in_channel));
+    const auto kind = linear_slot(in_channel);
     auto stage = std::make_unique<detail::FastMapStage<TIn, TOut, std::function<TOut(const TIn&)>>>(
-        rt_, in_channel, out_channel, std::move(fn), slot, FlowRuntime::kQueueDepth);
+        rt_, in_channel, out_channel, std::move(fn),
+        rt_.register_specialized_slot(in_channel, kind), FlowRuntime::kQueueDepth);
     fast_stages_.push_back(stage.get());
     rt_.stages_.push_back(std::move(stage));
   }
@@ -1001,9 +1021,10 @@ class SpecializeBuilder {
                                 std::function<TOut(const TIn&)>(std::move(fn)));
       return;
     }
-    auto* slot = rt_.register_specialized_slot(in_channel, linear_slot(in_channel));
+    const auto kind = linear_slot(in_channel);
     auto stage = std::make_unique<detail::FastMapStage<TIn, TOut, F>>(
-        rt_, in_channel, out_channel, std::move(fn), slot, FlowRuntime::kQueueDepth);
+        rt_, in_channel, out_channel, std::move(fn),
+        rt_.register_specialized_slot(in_channel, kind), FlowRuntime::kQueueDepth);
     fast_stages_.push_back(stage.get());
     rt_.stages_.push_back(std::move(stage));
   }
@@ -1015,11 +1036,12 @@ class SpecializeBuilder {
       rt_.attach_join<TA, TB, TC>(in_a, in_b, out_channel, std::move(fn));
       return;
     }
-    auto* slot_a = rt_.register_specialized_slot(in_a, join_slot(in_a));
-    auto* slot_b = rt_.register_specialized_slot(in_b, join_slot(in_b));
+    const auto kind_a = join_slot(in_a);
+    const auto kind_b = join_slot(in_b);
     auto stage = std::make_unique<
         detail::FastJoinStage<TA, TB, TC, std::function<TC(const TA&, const TB&)>>>(
-        rt_, in_a, in_b, out_channel, std::move(fn), slot_a, slot_b, FlowRuntime::kQueueDepth);
+        rt_, in_a, in_b, out_channel, std::move(fn), rt_.register_specialized_slot(in_a, kind_a),
+        rt_.register_specialized_slot(in_b, kind_b), FlowRuntime::kQueueDepth);
     fast_stages_.push_back(stage.get());
     rt_.stages_.push_back(std::move(stage));
   }
@@ -1033,10 +1055,11 @@ class SpecializeBuilder {
                                   std::function<TC(const TA&, const TB&)>(std::move(fn)));
       return;
     }
-    auto* slot_a = rt_.register_specialized_slot(in_a, join_slot(in_a));
-    auto* slot_b = rt_.register_specialized_slot(in_b, join_slot(in_b));
+    const auto kind_a = join_slot(in_a);
+    const auto kind_b = join_slot(in_b);
     auto stage = std::make_unique<detail::FastJoinStage<TA, TB, TC, F>>(
-        rt_, in_a, in_b, out_channel, std::move(fn), slot_a, slot_b, FlowRuntime::kQueueDepth);
+        rt_, in_a, in_b, out_channel, std::move(fn), rt_.register_specialized_slot(in_a, kind_a),
+        rt_.register_specialized_slot(in_b, kind_b), FlowRuntime::kQueueDepth);
     fast_stages_.push_back(stage.get());
     rt_.stages_.push_back(std::move(stage));
   }
@@ -1044,19 +1067,21 @@ class SpecializeBuilder {
   template <typename T>
   void add_sink(const std::string& channel,
                 std::function<void(const T&, const core::Lineage&)> fn) {
-    auto* slot = rt_.register_specialized_slot(channel, linear_slot(channel));
+    const auto kind = linear_slot(channel);
     rt_.stages_.push_back(
         std::make_unique<
             detail::FastSinkStage<T, std::function<void(const T&, const core::Lineage&)>>>(
-            channel, std::move(fn), slot, FlowRuntime::kQueueDepth));
+            channel, std::move(fn), rt_.register_specialized_slot(channel, kind),
+            FlowRuntime::kQueueDepth));
   }
 
   // Per-fn variant (ADR-0035), same discipline as add_map_fn.
   template <typename T, typename F>
   void add_sink_fn(const std::string& channel, F fn) {
-    auto* slot = rt_.register_specialized_slot(channel, linear_slot(channel));
+    const auto kind = linear_slot(channel);
     rt_.stages_.push_back(std::make_unique<detail::FastSinkStage<T, F>>(
-        channel, std::move(fn), slot, FlowRuntime::kQueueDepth));
+        channel, std::move(fn), rt_.register_specialized_slot(channel, kind),
+        FlowRuntime::kQueueDepth));
   }
 
   // Binds every fast producer's fan-out now that all consumers are
