@@ -1,0 +1,27 @@
+2026-09-18T13:34:42+08:00
+Running tools/../build/desktop-release/bin/codegen_vs_handwritten
+Run on (24 X 4761.23 MHz CPU s)
+CPU Caches:
+  L1 Data 48 KiB (x12)
+  L1 Instruction 32 KiB (x12)
+  L2 Unified 1024 KiB (x12)
+  L3 Unified 16384 KiB (x3)
+Load Average: 5.70, 4.15, 2.22
+---------------------------------------------------------------------------------
+Benchmark                       Time             CPU   Iterations UserCounters...
+---------------------------------------------------------------------------------
+run_handwritten/short   174411118 ns    174260242 ns            7 hops=1 items_per_second=0/s p50_ns=111 p999_ns=150 p99_ns=140
+run_interpreted/short   452042956 ns    451672535 ns            3 hops=1 items_per_second=0/s p50_ns=390 p999_ns=551 p99_ns=431
+run_compiled/short      161598103 ns    161442748 ns            9 hops=1 items_per_second=0/s p50_ns=110 p999_ns=140 p99_ns=120
+run_handwritten/medium  399570222 ns    399210594 ns            3 hops=4 items_per_second=0/s p50_ns=291 p999_ns=381 p99_ns=321
+run_interpreted/medium 1198021054 ns   1196902348 ns            1 hops=4 items_per_second=0/s p50_ns=1.082k p999_ns=1.523k p99_ns=1.173k
+run_compiled/medium     339083531 ns    338797490 ns            4 hops=4 items_per_second=0/s p50_ns=250 p999_ns=321 p99_ns=280
+run_handwritten/long    900207392 ns    899421541 ns            2 hops=9 items_per_second=0/s p50_ns=672 p999_ns=1.002k p99_ns=742
+run_interpreted/long   2818411146 ns   2815740003 ns            1 hops=9 items_per_second=0/s p50_ns=2.595k p999_ns=4.117k p99_ns=2.826k
+run_compiled/long       712347211 ns    711670511 ns            2 hops=9 items_per_second=0/s p50_ns=561 p999_ns=791 p99_ns=591
+run_handwritten_fanin   322701953 ns        50553 ns          100 hops=2 items_per_second=0/s p50_ns=6.322k p999_ns=3.34301M p99_ns=3.34301M
+run_interpreted_fanin   439691459 ns       133498 ns          100 hops=2 items_per_second=0/s p50_ns=1.082k p999_ns=6.68377M p99_ns=3.34431M
+run_compiled_fanin      210807130 ns       198268 ns          100 hops=2 items_per_second=0/s p50_ns=481 p999_ns=6.67805M p99_ns=3.33983M
+run_handwritten_fanout  594101318 ns    593464165 ns            2 hops=1 items_per_second=0/s p50_ns=360 p999_ns=1.102k p99_ns=491
+run_interpreted_fanout 1529279633 ns   1528008770 ns            1 hops=1 items_per_second=0/s p50_ns=1.062k p999_ns=2.164k p99_ns=1.443k
+run_compiled_fanout     556715241 ns    556022127 ns            3 hops=1 items_per_second=0/s p50_ns=340 p999_ns=1.072k p99_ns=451
