@@ -61,6 +61,9 @@ class Backtracker {
     stack_.clear();
     walk_.clear();
     nodes_.clear();
+    // Reset per endpoint: a surviving best_ makes a later, smaller-
+    // deadline endpoint inherit this path as a false violation.
+    best_ = PathResult{};
     stack_.push_back(Frame{.channel = endpoint, .acc = Micros{0}});
     run();
     return best_;

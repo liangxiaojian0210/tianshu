@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -268,6 +269,46 @@ TEST(SlaTest, RuntimeSnapshotEmptyWithoutEndpoints) {
   tianshu::dsl::FlowRuntime runtime;
   runtime.run_for(flow, std::chrono::milliseconds(50));
   EXPECT_TRUE(runtime.sla_snapshot().empty());
+}
+
+// 11. Backtracker state isolation: each endpoint's worst path is
+//     computed independently. Regression: best_ survived across
+//     worst_path() calls, so the shallow endpoint analyzed second
+//     inherited the deep endpoint's 8ms path and failed its 3ms
+//     deadline as a false violation.
+TEST(SlaTest, EndpointsDoNotShareWorstPath) {
+  const std::vector<tianshu::sla::SlaSource> sources = {
+      {.channel = "deep/src", .interval = std::chrono::milliseconds(100)},
+      {.channel = "shallow/src", .interval = std::chrono::milliseconds(100)},
+  };
+  const std::vector<tianshu::sla::SlaNode> nodes = {
+      {.kind = "map",
+       .in_channels = {"deep/src"},
+       .out_channel = "deep/out",
+       .wcet = std::chrono::milliseconds(8)},
+      {.kind = "map",
+       .in_channels = {"shallow/src"},
+       .out_channel = "shallow/out",
+       .wcet = std::chrono::milliseconds(1)},
+  };
+  const std::vector<tianshu::sla::SlaEndpoint> endpoints = {
+      {.channel = "deep/out", .deadline = std::chrono::milliseconds(50)},
+      {.channel = "shallow/out", .deadline = std::chrono::milliseconds(3)},
+  };
+
+  const auto report =
+      tianshu::sla::SlaAnalyzer::analyze(sources, nodes, endpoints, tianshu::sla::SlaConfig{});
+
+  ASSERT_TRUE(report.ok);
+  EXPECT_TRUE(report.violations.empty());
+  ASSERT_EQ(report.budgets.size(), 2U);
+  for (const auto& b : report.budgets) {
+    if (b.channel == "deep/out") {
+      EXPECT_EQ(b.planned, std::chrono::microseconds(50000));
+    } else if (b.channel == "shallow/out") {
+      EXPECT_EQ(b.planned, std::chrono::microseconds(3000));
+    }
+  }
 }
 
 }  // namespace
