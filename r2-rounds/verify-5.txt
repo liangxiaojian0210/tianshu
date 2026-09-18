@@ -1,0 +1,14 @@
+2026-09-18T11:02:24+08:00
+Running tools/../build/desktop-release/bin/codegen_vs_handwritten
+Run on (24 X 4093.56 MHz CPU s)
+CPU Caches:
+  L1 Data 48 KiB (x12)
+  L1 Instruction 32 KiB (x12)
+  L2 Unified 1024 KiB (x12)
+  L3 Unified 16384 KiB (x3)
+Load Average: 2.25, 2.11, 3.14
+---------------------------------------------------------------------------------
+Benchmark                       Time             CPU   Iterations UserCounters...
+---------------------------------------------------------------------------------
+run_handwritten_fanout  713818051 ns    711969658 ns            2 hops=1 items_per_second=0/s p50_ns=420 p999_ns=601 p99_ns=571
+run_compiled_fanout     758373983 ns    756143639 ns            2 hops=1 items_per_second=0/s p50_ns=460 p999_ns=771 p99_ns=621

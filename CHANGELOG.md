@@ -74,6 +74,13 @@ Phase 1 PoC — in progress.
   diff itself drifts 40 -> 61-89, violating the round-identity
   validity criterion; the quiet-window baseline is diff=40 exactly
   (prediction for this change: 28-34).
+- Quiet-window verification (10 rounds): prediction MISSED — diff mode
+  stays 40 (31-50 band) and the instruction delta (+~3k/msg) is
+  unchanged, refuting the virtual-slot hypothesis. After two failed
+  cuts (C1 ring locality, virtual pops) fan-out cutting stops per the
+  two-strike discipline: m = 10 ns/branch stands, diffuse below
+  instruction-level attribution. The typed-slot change is retained as
+  behavior-neutral cleanup with the refuted hypothesis recorded.
 
 ### Gold-standard concurrency equivalence for fan-in (ADR-0037)
 
