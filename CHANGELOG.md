@@ -62,6 +62,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- pipeline_test bare-run cache collision under parallel ctest: the four
+  pipeline acceptance cases each remove_all() then rebuild one fixed
+  /tmp/tianshu-pipeline-test-cache directory, so concurrent invocations
+  (gtest_discover_tests runs each case as its own process) raced on the
+  same dir. The bare-run fallback is now PID-suffixed (TEST_TMPDIR
+  sandbox runs unchanged); verified with six concurrent binary runs,
+  all 4/4 green, plus full ctest 357/357 and bazel 36/36.
 - SlaAnalyzer backtracker state leak across endpoints: worst_path()
   kept the previous endpoint's best path, so a later endpoint with a
   smaller deadline inherited an earlier endpoint's larger worst path

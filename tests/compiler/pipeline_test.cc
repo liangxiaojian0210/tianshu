@@ -18,6 +18,8 @@
 
 #include "tianshu/compiler/pipeline.h"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -53,11 +55,13 @@ namespace {
 namespace compiler = tianshu::compiler;
 namespace dsl = tianshu::dsl;
 
-// Bazel sandboxes only guarantee TEST_TMPDIR writable; bare runs share /tmp.
+// Bazel sandboxes only guarantee TEST_TMPDIR writable; bare runs share /tmp,
+// so the fallback cache is PID-suffixed to keep parallel invocations apart.
 std::string cache_dir() {
   const char* tmp = std::getenv("TEST_TMPDIR");
-  return tmp != nullptr ? std::string(tmp) + "/tianshu-gen-cache"
-                        : "/tmp/tianshu-pipeline-test-cache";
+  return tmp != nullptr
+             ? std::string(tmp) + "/tianshu-gen-cache"
+             : "/tmp/tianshu-pipeline-test-cache." + std::to_string(static_cast<int>(getpid()));
 }
 
 compiler::CompileOptions cache_opts(const std::string& dir, std::string cc = {}) {
