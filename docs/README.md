@@ -9,7 +9,7 @@
 
 | 你是谁 | 路径 |
 |---|---|
-| **5 分钟了解项目** | [README.md](../README.md) → [00-overview.md](./00-overview.md) → [01-roadmap.md](./01-roadmap.md) |
+| **5 分钟了解项目** | [README.md](../README.md) → [00-overview.md](./00-overview.md) → [01-roadmap.md](./01-roadmap.md) → [06-benchmarks.md](./06-benchmarks.md) |
 | **学习 / 参与开发**（人或 AI） | [00-overview.md](./00-overview.md) → [**arch/01-architecture.md**](./arch/01-architecture.md)（总体架构 + 模块地图）→ [arch/modules/](./arch/modules/)（目标模块深读）→ [05-dsl-getting-started.md](./05-dsl-getting-started.md)（动手）→ 跑 [examples/](../examples/) |
 | **查"当时为什么这么定"** | [adr/README.md](./adr/README.md)（按域检索）→ 具体 ADR |
 
@@ -24,6 +24,7 @@ docs/
 ├── 03-full-chain-demo.md      全链路闭环 Demo 讲解（叙事）
 ├── 04-data-model-generalization.md  数据模型一般化里程碑（叙事）
 ├── 05-dsl-getting-started.md  DSL 入门教程（叙事）
+├── 06-benchmarks.md           基准与假设验证数据（H1/H2/H3 判定 + 证据索引）
 ├── arch/                      ★ 活文档（as-built 现状，每次迭代同步）
 │   ├── README.md              架构文档导航 + 模块状态表 + 维护契约
 │   ├── 01-architecture.md     总体架构：分层 / 模块地图 / 消息生命周期

@@ -91,6 +91,7 @@ const auto flow = b.build();  // 逐消息血缘自动携带；ADR-0030 落地�
 - [docs/README.md](./docs/README.md) — 文档导览（三条阅读路径）
 - [docs/00-overview.md](./docs/00-overview.md) — 一句话说清楚 + 四层架构 + 三层确定性
 - [docs/01-roadmap.md](./docs/01-roadmap.md) — Phase 0/1/2/3 路线图 + 里程碑 + 风险登记
+- [docs/06-benchmarks.md](./docs/06-benchmarks.md) — 基准与三假设验证数据（H1/H2/H3 判定数字、证据与复现入口）
 
 ### 活文档（as-built 架构与模块设计，每次迭代同步）
 
