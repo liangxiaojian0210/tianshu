@@ -6,6 +6,34 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — public benchmark data page (M1 close-out)
+
+- `docs/06-benchmarks.md`: the Phase 1 verdict numbers in one public
+  page — H2 five-shape same-round diffs (all <=0, fan-in -3817~-5841
+  with the ADR-0037 equivalence semantics), H1 14-case byte-identical
+  equivalence entry point, H3 two-round predictive-power table (7
+  stages, eps <= 9.80%), gate semantics v3 summary, host/shield
+  caveats, evidence index (r2-rounds/, h3-rounds/), and reproduction
+  entries; linked from docs/README.md and the main README index
+
+### Added — PoC demo kit (M1 close-out)
+
+- `demo/poc-demo.sh`: six-beat walkthrough of the Phase 1 closed
+  loop (ti verb discovery -> traceable_flow_demo whole loop ->
+  `ti compile --emit-source` -> `ti launch` flow mode until SIGINT ->
+  record/replay bit-identical -> `ti-info --lineage`/`--calibrate`);
+  PACE env paces beats for screen recording, BIN_DIR overrides the
+  build directory
+- `demo/poc-demo.cast`: recorded asciinema v2 session of the full
+  walkthrough (agg-convertible to GIF); `demo/README.md` maps each
+  beat to the framework promise and ADR it demonstrates
+- `examples/traceable_flow_decls.h`: flow declarations shared by the
+  demo binary and the new provider; `examples/traceable_flow_provider.cc`
+  (+ CMake `traceable_flow_provider` SHARED / Bazel
+  `libtraceable_flow_provider.so`) registers demo_traceable /
+  demo_traceable_lite at static init so the CLI faces are drivable
+  via `--flows` without touching test providers
+
 ### Added — ti compile offline CLI (ADR-0030 M-B)
 
 - new `ti-compile` binary (`ti-compile <flow-name>`): name-based

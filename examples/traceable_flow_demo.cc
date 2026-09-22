@@ -19,59 +19,16 @@
 // README's target-API first line is now real code.
 
 #include <chrono>
-#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <string>
 
 #include "tianshu/compiler/ir.h"
 #include "tianshu/compiler/pipeline.h"
-#include "tianshu/core/lineage.h"
-#include "tianshu/core/message_traits.h"
 #include "tianshu/dsl/dsl_runtime.h"
 #include "tianshu/dsl/flow.h"
-#include "tianshu/sla/sla_analyzer.h"
 
-// NOLINTNEXTLINE(misc-use-internal-linkage)  // traits must precede template use
-struct DemoTick {
-  std::uint64_t tick{0};
-};
-// NOLINTNEXTLINE(misc-use-internal-linkage)  // same ordering constraint
-struct DemoDoubled {
-  std::uint64_t tick{0};
-  double value{0.0};
-};
-
-TIANSHU_TRAITS_POD(DemoTick, "trace.DemoTick");
-TIANSHU_TRAITS_POD(DemoDoubled, "trace.DemoDoubled");
-
-namespace {
-
-[[maybe_unused]] void declare_demo_flow(tianshu::dsl::FlowBuilder& b) {
-  b.source<DemoTick>("ticks", std::chrono::milliseconds(5),
-                     [](std::uint64_t t) { return DemoTick{.tick = t}; })
-      .map<DemoDoubled>([](const DemoTick& in) {
-        return DemoDoubled{.tick = in.tick, .value = static_cast<double>(in.tick) * 2};
-      })
-      .with_wcet(std::chrono::microseconds(80))
-      .sink([](const DemoDoubled& msg, const tianshu::core::Lineage& lin) {
-        if (msg.tick < 3) {
-          static_cast<void>(std::printf("[sink] tick=%llu value=%.1f  %s\n",
-                                        static_cast<unsigned long long>(msg.tick), msg.value,
-                                        lin.describe().c_str()));
-        }
-      })
-      .with_sla(tianshu::sla::Sla{.deadline = std::chrono::milliseconds(20)})
-      .with_fallback("demo_traceable_lite");
-}
-
-[[maybe_unused]] void declare_demo_flow_lite(tianshu::dsl::FlowBuilder& b) {
-  b.source<DemoTick>("lite_ticks", std::chrono::milliseconds(50), [](std::uint64_t t) {
-     return DemoTick{.tick = t};
-   }).sink([](const DemoTick&, const tianshu::core::Lineage&) {});
-}
-
-}  // namespace
+#include "traceable_flow_decls.h"
 
 REGISTER_TRACEABLE_FLOW("demo_traceable", declare_demo_flow)
 REGISTER_TRACEABLE_FLOW("demo_traceable_lite", declare_demo_flow_lite)

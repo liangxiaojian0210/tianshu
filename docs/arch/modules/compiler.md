@@ -210,7 +210,7 @@ extern "C" void tianshu_flow_install(tianshu::dsl::FlowRuntime* rt,
 - `tests/compiler/pipeline_validation_test.cc`（5 用例，D6 降级路径）：悬空输入 / 重复生产者结构拒绝（经 `IrGraphTestPeer` 友元注入故障图——公共 IR 面刻意不可变）· 良形图通过 · strict 模式抛 `runtime_error` · `CompiledFlow` 移动语义全路径。
 - `tests/cli/ti_compile_test.cc`（7 用例，M-B CLI 面，TI_BIN_DIR 子进程 + provider `.so`）：成功产物落盘 / 缓存命中 / `--emit-source` / 未知 flow rc 1 / `--no-fallback` rc 1 与默认降级 rc 0 / `--list` / usage rc 2（条目详见 [modules/cli.md](./cli.md) §6）。
 - 基准：`benchmarks/codegen_vs_handwritten.cc`——5 链形 × 3 实现各 1M 条（fan-out 4M 样本），P50/P99/P99.9 counters；运行 `./build/desktop-release/bin/codegen_vs_handwritten --benchmark_min_time=1s`。**H2 判决数字必须按 §6.1 测量协议取**。
-- 示例：`examples/traceable_flow_demo.cc`（M-D：注册表枚举 → 按名 dry-run trace → SLA 报告 / artifact hash / fallback 阶梯打印 → 编译运行 → `fallback_state()`）。
+- 示例：`examples/traceable_flow_demo.cc`（M-D：注册表枚举 → 按名 dry-run trace → SLA 报告 / artifact hash / fallback 阶梯打印 → 编译运行 → `fallback_state()`；声明抽取自 `traceable_flow_decls.h`，与 `traceable_flow_provider.cc` 共享）；公开基准数据页 [06-benchmarks.md](../../06-benchmarks.md)。
 
 ### 6.1 H2 判决测量协议（2026-09-16 实机验证）
 

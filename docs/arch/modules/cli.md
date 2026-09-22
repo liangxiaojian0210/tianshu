@@ -196,7 +196,7 @@ flowchart TD
 - `tests/cli/ti_launch_flow_test.cc`（4 用例，TI_BIN_DIR 子进程模式）+ provider 库 `tests/cli/ti_launch_flow_test_flows.cc`（SHARED，注册 `tick_writer`：5ms 源 → map → sink，按 `$TI_LAUNCH_TEST_OUT` 环境变量逐行追加文件）：flow 模式跑至 SIGTERM（5s 内 ≥3 行、退出码 0、停机 200ms 后行数冻结）· 文件模式契约不变（不存在文件 rc 1）· 既非文件亦非注册 flow rc 1 且 stderr 双解释 · flow 模式给 `--mode` rc 2。
 - H3 验证装置：`benchmarks/h3_wcet_rig.cc`（三分支七 stage 自旋 rig）+ `tools/h3_shield.sh`（屏蔽单轮 = env preamble + rig stdout + calibrate 表归一文件）+ 证据 `h3-rounds/`（ADR-0038，2026-09-18 判定 PASS）。
 - 手工验证记录（CHANGELOG）：`shm_talker` + `ti-monitor --once` 两进程免 `--decode` 跨进程自动解码 ImuData 字段（ADR-0020 Phase 2 验收）；Hello DAG 里程碑 15/15 消息全栈贯通。
-- 示例：`examples/hello_dag.cc` + `examples/hello.flow`（Launcher 库形态 + ti-launch 同格式文件）；`examples/record_replay_demo.cc` 的 `.trec` 可直接喂 `ti-info`。
+- 示例：`examples/hello_dag.cc` + `examples/hello.flow`（Launcher 库形态 + ti-launch 同格式文件）；`examples/record_replay_demo.cc` 的 `.trec` 可直接喂 `ti-info`；`examples/traceable_flow_provider.cc`（SHARED，注册 `demo_traceable` / `demo_traceable_lite`，与 `traceable_flow_demo` 共享 `traceable_flow_decls.h` 声明）供 `demo/poc-demo.sh` 以 `--flows` 驱动 `ti-compile` / `ti-launch` flow 模式。
 - 基准：无专属基准（CLI 层无热路径；相关性能属 transport / dsl 模块）。
 
 ## 7. 已知限制与演进方向

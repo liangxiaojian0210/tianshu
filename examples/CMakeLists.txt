@@ -30,3 +30,10 @@ target_link_libraries(record_replay_demo PRIVATE tianshu)
 
 add_executable(traceable_flow_demo traceable_flow_demo.cc)
 target_link_libraries(traceable_flow_demo PRIVATE tianshu tianshu_compiler)
+
+# Provider .so for the PoC demo walkthrough (demo/poc-demo.sh): registers
+# demo_traceable at static init; ti-compile/ti-launch find it via --flows.
+add_library(traceable_flow_provider SHARED traceable_flow_provider.cc)
+target_link_libraries(traceable_flow_provider PRIVATE tianshu)
+set_target_properties(traceable_flow_provider PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

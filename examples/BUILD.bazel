@@ -70,9 +70,23 @@ cc_binary(
 
 cc_binary(
     name = "traceable_flow_demo",
-    srcs = ["traceable_flow_demo.cc"],
+    srcs = [
+        "traceable_flow_decls.h",
+        "traceable_flow_demo.cc",
+    ],
     deps = [
         "//tianshu",
         "//tianshu:tianshu_compiler",
     ],
+)
+
+# Provider .so for the PoC demo walkthrough (demo/poc-demo.sh).
+cc_binary(
+    name = "libtraceable_flow_provider.so",
+    srcs = [
+        "traceable_flow_decls.h",
+        "traceable_flow_provider.cc",
+    ],
+    linkshared = True,
+    deps = ["//tianshu"],
 )
