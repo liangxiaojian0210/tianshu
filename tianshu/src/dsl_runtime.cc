@@ -438,7 +438,12 @@ void FlowRuntime::attach_referenced_component(const std::string& registry_name,
     bridge_node_ = std::make_unique<core::Node>(transport::TransportMode::kIntra);
   }
   comp->set_out_channel_override(out_channel);
-  if (!comp->launch(*bridge_node_, {in_channel}, {})) {
+  // Named vector (not a braced temporary): GCC 13 -O3 jump-threading merges
+  // the early-return path with the temporary's destruction and misreports a
+  // sized delete as a non-heap free (-Wfree-nonheap-object, only with -Werror
+  // on GCC 13; clean on GCC 14/15 and clang).
+  const std::vector<std::string> inputs{in_channel};
+  if (!comp->launch(*bridge_node_, inputs, {})) {
     return;
   }
   // Lineage pairing (ADR-0025 correction): the lineage_queue pops 1:1 with the

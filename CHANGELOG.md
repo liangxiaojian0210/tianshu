@@ -90,6 +90,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- GCC 13 release CI leg red since 2026-09-17 (-Werror=free-nonheap-object):
+  GCC 13 -O3 jump-threading merges attach_referenced_component's
+  early-return path with the destruction of the braced-temporary
+  vector<string> argument and misreports its sized delete as a free of
+  a pointer with nonzero offset. Restructured the launch argument into
+  a named vector (semantics identical); red/green verified against
+  gcc:13 (13.5.0) with the exact CI flag set — braced temporary fails,
+  named vector compiles — plus a full tianshu/src + tianshu/cli TU
+  sweep (all green) and the local gates (gcc 15: cmake debug/release,
+  ctest 357/357, bazel 36/36). Local compilers never showed it, which
+  is why main stayed green locally while CI failed.
 - pipeline_test bare-run cache collision under parallel ctest: the four
   pipeline acceptance cases each remove_all() then rebuild one fixed
   /tmp/tianshu-pipeline-test-cache directory, so concurrent invocations
